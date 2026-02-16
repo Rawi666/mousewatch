@@ -1,6 +1,6 @@
 # MouseWatch
 
-Battery monitor for MCHOSE wireless mice. Shows battery level in the system tray and sends a Windows notification when battery is low.
+Battery monitor for MCHOSE wireless mice. Runs as a Windows system tray application — the tray icon shows the current battery percentage and changes color based on level. Click the icon to refresh and see the latest status. Right-click for settings and other options.
 
 ## Supported mice
 
@@ -22,6 +22,23 @@ python mousewatch.py -t 15          # set low battery threshold to 15%
 python mousewatch.py -i 60          # poll every 60 seconds
 python mousewatch.py -m "L7 Ultra+" # skip auto-detection
 ```
+
+## Settings
+
+Right-click the tray icon and select "Settings" to configure:
+
+- **Battery threshold** — percentage to trigger low battery alert (1-100%, default 20%)
+- **Reminder interval** — minimum time between repeated low battery notifications (default 300s)
+- **Poll interval** — how often to check the battery (default 300s)
+- **Notification sound** — toggle toast notification sound on/off
+- **Start with Windows** — automatically launch on login
+
+Settings are saved to `%LOCALAPPDATA%\MouseWatch\settings.json` and persist across restarts. CLI arguments (`--threshold`, `--interval`) override saved settings when provided.
+
+## Notifications
+
+- **Low battery** — fires when battery drops below threshold (not while charging)
+- **Fully charged** — fires once when battery reaches 100% while charging
 
 ## Install as startup app
 
