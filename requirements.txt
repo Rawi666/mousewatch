@@ -1,0 +1,4 @@
+hidapi
+winotify
+pystray
+Pillow
