@@ -13,7 +13,7 @@ if errorlevel 1 (
 echo.
 echo Building MouseWatch.exe...
 pip install pyinstaller
-pyinstaller --onefile --noconsole --name MouseWatch mousewatch.py
+python -m PyInstaller --onefile --noconsole --name MouseWatch mousewatch.py
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed.
     pause
