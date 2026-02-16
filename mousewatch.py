@@ -187,6 +187,12 @@ def query_battery(path: bytes) -> dict | None:
         decoded = xor_decode(bytes(raw[2:]))
 
         vid, pid = struct.unpack_from("<HH", decoded, 0)
+
+        # All-zero decoded data means the device returned 0xFF filler
+        # (stale/invalid response). Reject it.
+        if vid == 0 and pid == 0:
+            return None
+
         fw_version = struct.unpack_from("<I", decoded, 4)[0]
         status_byte = decoded[8]
         connect_mode = status_byte & 0x07
@@ -494,6 +500,11 @@ class TrayApp:
             self._poll_interrupt.clear()
 
             resp = query_battery(self.hid_path)
+            for _ in range(5):
+                if resp is not None:
+                    break
+                time.sleep(2)
+                resp = query_battery(self.hid_path)
             if resp is None:
                 continue
 
