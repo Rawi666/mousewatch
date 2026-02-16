@@ -455,6 +455,7 @@ class TrayApp:
         self.notification_sound = settings["notification_sound"]
         self.notified_at = None
         self._last_notify_time = 0
+        self._notified_full = False
         self.level = initial_resp["battery_level"]
         self.charging = (initial_resp["charge_status"] != 0
                          or initial_resp["connect_mode"] == 0)
@@ -476,9 +477,26 @@ class TrayApp:
         )
 
     def _on_status(self, icon, item):
+        resp = query_battery(self.hid_path)
+        for _ in range(5):
+            if resp is not None:
+                break
+            time.sleep(2)
+            resp = query_battery(self.hid_path)
+
+        if resp is None:
+            msg = "Failed to read battery status"
+        else:
+            self.level = resp["battery_level"]
+            self.charging = (resp["charge_status"] != 0
+                             or resp["connect_mode"] == 0)
+            self.status_text = self._status_text()
+            self.icon.icon = create_battery_icon(self.level, self.charging)
+            self.icon.title = self.status_text
+            msg = f"{self.status_text}\nUpdated at {time.strftime('%H:%M:%S')}"
+
         try:
-            notify_windows("MouseWatch", self.status_text,
-                           sound=self.notification_sound)
+            notify_windows("MouseWatch", msg, sound=self.notification_sound)
         except Exception:
             pass
 
@@ -516,6 +534,20 @@ class TrayApp:
             # Update icon and tooltip
             self.icon.icon = create_battery_icon(self.level, self.charging)
             self.icon.title = self.status_text
+
+            # Fully charged notification (once per charge cycle)
+            if self.level == 100 and self.charging and not self._notified_full:
+                self._notified_full = True
+                try:
+                    notify_windows(
+                        "MouseWatch - Fully Charged",
+                        f"MCHOSE {self.model} is fully charged",
+                        sound=self.notification_sound,
+                    )
+                except Exception:
+                    pass
+            elif not self.charging or self.level < 100:
+                self._notified_full = False
 
             # Low battery notification with reminder interval
             now = time.time()
