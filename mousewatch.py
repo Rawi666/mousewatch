@@ -24,6 +24,7 @@ DEFAULTS = {
     "reminder_interval": 300,
     "poll_interval": 300,
     "notification_sound": True,
+    "device_notifications": True,
     "start_with_windows": False,
 }
 
@@ -158,6 +159,23 @@ def find_mchose_devices() -> list[dict]:
                 results.append(dev)
     results.sort(key=lambda d: (d["usage_page"] != 0xFF01, d["usage_page"]))
     return results
+
+
+def find_wired_mchose() -> dict | None:
+    """Check if a MCHOSE mouse is connected via USB cable (any usage page).
+
+    Returns dict with 'name' and 'path' (FF01 usage page preferred), or None.
+    """
+    best = None
+    for vid in ALL_VIDS:
+        for dev in hid.enumerate(vid):
+            name = dev.get("product_string") or ""
+            if "MCHOSE" in name.upper():
+                if best is None or dev["usage_page"] == 0xFF01:
+                    best = {"name": name, "path": dev["path"]}
+                    if dev["usage_page"] == 0xFF01:
+                        return best
+    return best
 
 
 def query_battery(path: bytes) -> dict | None:
@@ -397,6 +415,12 @@ class SettingsWindow:
             row=row, column=0, columnspan=2, sticky="w", pady=4)
 
         row += 1
+        self._devnotify_var = tk.BooleanVar(value=tray_app.device_notifications)
+        ttk.Checkbutton(frame, text="Device connect/disconnect notifications",
+                         variable=self._devnotify_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=4)
+
+        row += 1
         self._startup_var = tk.BooleanVar(value=_startup_shortcut_exists())
         ttk.Checkbutton(frame, text="Start with Windows",
                          variable=self._startup_var).grid(
@@ -418,6 +442,7 @@ class SettingsWindow:
             "reminder_interval": self._reminder_var.get(),
             "poll_interval": self._poll_var.get(),
             "notification_sound": self._sound_var.get(),
+            "device_notifications": self._devnotify_var.get(),
             "start_with_windows": self._startup_var.get(),
         }
         save_settings(settings)
@@ -426,6 +451,7 @@ class SettingsWindow:
         app.threshold = settings["threshold"]
         app.reminder_interval = settings["reminder_interval"]
         app.notification_sound = settings["notification_sound"]
+        app.device_notifications = settings["device_notifications"]
 
         # If poll interval changed, interrupt current wait so it takes effect
         if app.interval != settings["poll_interval"]:
@@ -437,6 +463,87 @@ class SettingsWindow:
 
     def _on_close(self):
         SettingsWindow._instance = None
+        self._root.destroy()
+
+
+class DebugWindow:
+    """Tkinter debug window showing raw HID data."""
+
+    _instance = None
+
+    def __init__(self, tray_app: "TrayApp"):
+        if DebugWindow._instance is not None:
+            try:
+                DebugWindow._instance._root.lift()
+                DebugWindow._instance._root.focus_force()
+                DebugWindow._instance._refresh()
+                return
+            except Exception:
+                DebugWindow._instance = None
+
+        DebugWindow._instance = self
+        self._tray_app = tray_app
+
+        import tkinter as tk
+        from tkinter import ttk
+
+        self._root = tk.Tk()
+        self._root.title("MouseWatch Debug")
+        self._root.resizable(False, False)
+        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        frame = ttk.Frame(self._root, padding=16)
+        frame.grid(sticky="nsew")
+
+        self._text = tk.Text(frame, width=70, height=20, font=("Consolas", 10),
+                              state="disabled")
+        self._text.grid(row=0, column=0, columnspan=2)
+
+        ttk.Button(frame, text="Refresh", command=self._refresh).grid(
+            row=1, column=0, pady=(8, 0), sticky="e", padx=4)
+        ttk.Button(frame, text="Close", command=self._on_close).grid(
+            row=1, column=1, pady=(8, 0), sticky="w", padx=4)
+
+        self._refresh()
+        self._root.mainloop()
+
+    def _refresh(self):
+        app = self._tray_app
+        lines = []
+        lines.append(f"Model:   MCHOSE {app.model}")
+        lines.append(f"Battery: {app.level}%")
+        lines.append(f"Status:  {'Charging' if app.charging else 'Wireless'}")
+        lines.append("")
+        lines.append("── Last E2 Input Report ──")
+        if app._last_e2_time:
+            lines.append(f"Time:    {app._last_e2_time}")
+            raw = app._last_e2_raw
+            dec = app._last_e2_decoded
+            lines.append(f"Raw:     {' '.join(f'{b:02X}' for b in raw)}")
+            lines.append(f"Decoded: {' '.join(f'{b:02X}' for b in dec)}")
+            lines.append("")
+            if len(dec) >= 6:
+                lines.append(f"  [0] Report ID:    0x{dec[0]:02X}")
+                lines.append(f"  [1] Notification: 0x{dec[1]:02X}")
+                lines.append(f"  [2] Sub-type hi:  0x{dec[2]:02X}")
+                lines.append(f"  [3] Sub-type lo:  0x{dec[3]:02X}")
+                lines.append(f"  [4] chargeStatus: {dec[4]}")
+                lines.append(f"  [5] batteryLevel: {dec[5]}%")
+                # Try to extract model name from bytes 8+
+                name_bytes = bytes(b for b in dec[8:] if 0x20 <= b < 0x7F)
+                if name_bytes:
+                    lines.append(f"  [8+] Model name:  {name_bytes.decode('ascii', errors='replace')}")
+        else:
+            lines.append("  No E2 reports received yet.")
+
+        import tkinter as tk
+        self._text.config(state="normal")
+        self._text.delete("1.0", tk.END)
+        self._text.insert("1.0", "\n".join(lines))
+        self._text.config(state="disabled")
+
+    def _on_close(self):
+        DebugWindow._instance = None
         self._root.destroy()
 
 
@@ -453,6 +560,7 @@ class TrayApp:
         self.interval = settings["poll_interval"]
         self.reminder_interval = settings["reminder_interval"]
         self.notification_sound = settings["notification_sound"]
+        self.device_notifications = settings["device_notifications"]
         self.notified_at = None
         self._last_notify_time = 0
         self._notified_full = False
@@ -463,9 +571,14 @@ class TrayApp:
         self._stop_event = threading.Event()
         self._poll_interrupt = threading.Event()
         self.icon = None
+        self._last_e2_raw = None
+        self._last_e2_decoded = None
+        self._last_e2_time = None
 
     def _status_text(self) -> str:
         status = "Charging" if self.charging else "Wireless"
+        if self.level == 0 and self.charging:
+            return f"MCHOSE {self.model} — Charging"
         return f"MCHOSE {self.model} — {self.level}% ({status})"
 
     def _create_menu(self):
@@ -473,6 +586,7 @@ class TrayApp:
         return pystray.Menu(
             pystray.MenuItem("Status", self._on_status, default=True),
             pystray.MenuItem("Settings", self._on_settings),
+            pystray.MenuItem("Debug", self._on_debug),
             pystray.MenuItem("Quit", self._on_quit),
         )
 
@@ -504,10 +618,118 @@ class TrayApp:
         threading.Thread(target=SettingsWindow, args=(self,),
                          daemon=True).start()
 
+    def _on_debug(self, icon, item):
+        threading.Thread(target=DebugWindow, args=(self,),
+                         daemon=True).start()
+
     def _on_quit(self, icon, item):
         self._stop_event.set()
         self._poll_interrupt.set()
         icon.stop()
+
+    def _input_listener(self):
+        """Background thread that listens for 0xE2 input reports (real-time battery/charge updates)."""
+        while not self._stop_event.is_set():
+            try:
+                dev = hid.device()
+                dev.open_path(self.hid_path)
+                dev.set_nonblocking(False)
+            except Exception:
+                if self._stop_event.wait(5):
+                    break
+                continue
+
+            try:
+                while not self._stop_event.is_set():
+                    # Blocking read with 1s timeout so we can check stop_event
+                    dev.set_nonblocking(False)
+                    raw = dev.read(64, timeout_ms=1000)
+                    if not raw:
+                        continue
+
+                    decoded = xor_decode(bytes(raw))
+                    self._last_e2_raw = list(raw)
+                    self._last_e2_decoded = list(decoded)
+                    self._last_e2_time = time.strftime("%H:%M:%S")
+
+                    # hidapi includes report ID as byte 0, so E2 data
+                    # starts at decoded[1]. WebHID strips the report ID.
+                    if len(decoded) < 6 or decoded[1] != 0xE2:
+                        continue
+
+                    charge_status = decoded[4]
+                    battery_level = decoded[5]
+                    if battery_level == 0 or battery_level > 100:
+                        continue
+
+                    old_charging = self.charging
+                    self.level = battery_level
+                    self.charging = charge_status != 0
+                    self.status_text = self._status_text()
+
+                    if self.icon:
+                        self.icon.icon = create_battery_icon(self.level, self.charging)
+                        self.icon.title = self.status_text
+
+                    # Notify on charge state change
+                    if self.charging != old_charging and self.device_notifications:
+                        if self.charging:
+                            msg = f"MCHOSE {self.model} is charging ({self.level}%)"
+                        else:
+                            msg = f"MCHOSE {self.model} unplugged ({self.level}%)"
+                        try:
+                            notify_windows("MouseWatch", msg,
+                                           sound=self.notification_sound)
+                        except Exception:
+                            pass
+
+                    # Check fully charged
+                    if self.level == 100 and self.charging and not self._notified_full:
+                        self._notified_full = True
+                        try:
+                            notify_windows(
+                                "MouseWatch - Fully Charged",
+                                f"MCHOSE {self.model} is fully charged",
+                                sound=self.notification_sound,
+                            )
+                        except Exception:
+                            pass
+                    elif not self.charging or self.level < 100:
+                        self._notified_full = False
+
+            except Exception:
+                pass
+            finally:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+                # Brief pause before reconnecting
+                if not self._stop_event.is_set():
+                    self._stop_event.wait(2)
+
+    def _device_watcher(self):
+        """Background thread that watches for USB device changes."""
+        known_paths = {d["path"] for d in find_mchose_devices()}
+        while not self._stop_event.wait(5):
+            current_paths = {d["path"] for d in find_mchose_devices()}
+            if current_paths != known_paths:
+                added = current_paths - known_paths
+                removed = known_paths - current_paths
+                known_paths = current_paths
+                self._poll_interrupt.set()
+                if self.device_notifications:
+                    if added and removed:
+                        msg = "Device reconnected"
+                    elif added:
+                        msg = "Device connected"
+                    else:
+                        msg = "Device disconnected"
+                    try:
+                        notify_windows("MouseWatch", msg,
+                                       sound=self.notification_sound)
+                    except Exception:
+                        pass
 
     def _poll_loop(self):
         """Background thread that polls battery and updates the tray icon."""
@@ -578,6 +800,12 @@ class TrayApp:
 
         poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         poll_thread.start()
+
+        input_thread = threading.Thread(target=self._input_listener, daemon=True)
+        input_thread.start()
+
+        watcher_thread = threading.Thread(target=self._device_watcher, daemon=True)
+        watcher_thread.start()
 
         self.icon.run()
 
@@ -718,15 +946,26 @@ def main():
             if result:
                 model, hid_path, resp = result
             else:
-                try:
-                    notify_windows(
-                        "MouseWatch",
-                        "No MCHOSE mouse detected. Make sure it's connected "
-                        "via the 2.4GHz dongle.",
-                    )
-                except Exception:
-                    pass
-                sys.exit(1)
+                wired = find_wired_mchose()
+                if wired:
+                    # Start in wired mode — no battery data yet,
+                    # input listener will pick up E2 reports.
+                    name = wired["name"].replace("MCHOSE ", "")
+                    model = name or "Unknown"
+                    hid_path = wired["path"]
+                    resp = {
+                        "battery_level": 0,
+                        "charge_status": 1,
+                        "connect_mode": 0,
+                    }
+                else:
+                    msg = ("No MCHOSE mouse detected. Make sure it's connected "
+                           "via the 2.4GHz dongle.")
+                    try:
+                        notify_windows("MouseWatch", msg)
+                    except Exception:
+                        pass
+                    sys.exit(1)
 
     # ── Find HID path if not yet resolved ──
     if hid_path is None:
