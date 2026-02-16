@@ -39,6 +39,12 @@ Settings are saved to `%LOCALAPPDATA%\MouseWatch\settings.json` and persist acro
 
 - **Low battery** — fires when battery drops below threshold (not while charging)
 - **Fully charged** — fires once when battery reaches 100% while charging
+- **Device connect/disconnect** — notifies when mouse USB state changes (toggleable)
+- **Charge state changes** — real-time notification when cable is plugged/unplugged
+
+## Wired mode
+
+If the mouse is connected via USB cable at startup (no dongle), the app launches in charging mode and updates in real-time via HID input reports. Battery percentage polling requires the 2.4GHz dongle.
 
 ## Install as startup app
 
@@ -50,4 +56,8 @@ This builds a standalone `MouseWatch.exe` and adds it to Windows startup. Run `u
 
 ## How it works
 
-Communicates with the mouse via HID feature reports through the 2.4GHz USB dongle. The protocol was reverse-engineered from the MCHOSE web configurator.
+Communicates with the mouse via HID through the 2.4GHz USB dongle. Uses two channels:
+- **Feature reports** (`0x11 0x06`) — periodic polling for battery level and status
+- **Input reports** (`0xE2`) — real-time push notifications for charge state changes
+
+The protocol was reverse-engineered from the MCHOSE web configurator.
