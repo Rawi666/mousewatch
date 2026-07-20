@@ -10,12 +10,46 @@ Protocol reverse-engineered from the MCHOSE WebHID configurator.
 import argparse
 import json
 import os
+import shlex
 import struct
+import subprocess
 import sys
 import threading
 import time
+from io import BytesIO
 
-import hid
+try:
+    if sys.platform.startswith("linux"):
+        import hidraw as hid
+        HID_BACKEND = "hidraw"
+    else:
+        import hid
+        HID_BACKEND = "hid"
+except ImportError:
+    import hid
+    HID_BACKEND = "hid"
+
+IS_WINDOWS = sys.platform.startswith("win")
+IS_LINUX = sys.platform.startswith("linux")
+
+if not IS_WINDOWS:
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
+    from PySide6.QtGui import QAction, QIcon, QImage, QPixmap
+    from PySide6.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QHBoxLayout,
+        QLabel,
+        QMenu,
+        QPlainTextEdit,
+        QPushButton,
+        QSpinBox,
+        QSystemTrayIcon,
+        QVBoxLayout,
+    )
 
 # ── Settings persistence ──────────────────────────────────────────────────
 
@@ -30,7 +64,13 @@ DEFAULTS = {
 
 
 def _config_dir() -> str:
-    return os.path.join(os.environ.get("LOCALAPPDATA", "."), "MouseWatch")
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA", ".")
+        return os.path.join(base, "MouseWatch")
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if not xdg_config:
+        xdg_config = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(xdg_config, "mousewatch")
 
 
 def _config_path() -> str:
@@ -61,10 +101,17 @@ def save_settings(settings: dict):
 # ── Startup shortcut management ──────────────────────────────────────────
 
 def _startup_shortcut_path() -> str:
+    if IS_WINDOWS:
+        return os.path.join(
+            os.environ.get("APPDATA", "."),
+            "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
+            "MouseWatch.lnk",
+        )
     return os.path.join(
-        os.environ.get("APPDATA", "."),
-        "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
-        "MouseWatch.lnk",
+        os.path.expanduser("~"),
+        ".config",
+        "autostart",
+        "mousewatch.desktop",
     )
 
 
@@ -73,17 +120,21 @@ def _startup_shortcut_exists() -> bool:
 
 
 def _set_startup(enabled: bool):
-    """Create or remove the startup shortcut."""
+    """Create or remove login startup entry for the current platform."""
     lnk_path = _startup_shortcut_path()
-    if enabled:
+    if not enabled:
+        if os.path.exists(lnk_path):
+            os.remove(lnk_path)
+        return
+
+    if IS_WINDOWS:
         if getattr(sys, "frozen", False):
             target = sys.executable
             arguments = ""
         else:
             target = sys.executable  # python.exe
             arguments = f'"{os.path.abspath(sys.argv[0])}"'
-        # Create .lnk via PowerShell
-        import subprocess
+
         ps_script = (
             f"$ws = New-Object -ComObject WScript.Shell; "
             f"$sc = $ws.CreateShortcut('{lnk_path}'); "
@@ -93,11 +144,32 @@ def _set_startup(enabled: bool):
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
         )
+        return
+
+    # XDG autostart for Linux desktop environments.
+    os.makedirs(os.path.dirname(lnk_path), exist_ok=True)
+    if getattr(sys, "frozen", False):
+        exec_cmd = shlex.quote(sys.executable)
     else:
-        if os.path.exists(lnk_path):
-            os.remove(lnk_path)
+        script_path = os.path.abspath(sys.argv[0])
+        exec_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(script_path)}"
+
+    desktop = "\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Version=1.0",
+        "Name=MouseWatch",
+        "Comment=MCHOSE battery monitor",
+        f"Exec={exec_cmd}",
+        "X-GNOME-Autostart-enabled=true",
+        "Terminal=false",
+        "",
+    ])
+    with open(lnk_path, "w", encoding="utf-8") as f:
+        f.write(desktop)
 
 # ── Device database ────────────────────────────────────────────────────────
 # All known MCHOSE vendor IDs (dongles may use any of these)
@@ -132,6 +204,8 @@ MOUSE_DB = {
 
 # Usage page for MCHOSE vendor-specific HID interface.
 USAGE_PAGES = [0xFF01]
+_LINUX_FALLBACK_USAGE_PAGES = [0x0000]
+_hid_permission_hint_shown = False
 
 # ── HID protocol constants ─────────────────────────────────────────────────
 REPORT_ID = 0x11
@@ -149,15 +223,28 @@ def xor_decode(data: bytes) -> bytes:
 # ── Device discovery ───────────────────────────────────────────────────────
 
 def find_mchose_devices() -> list[dict]:
-    """Enumerate HID devices and return MCHOSE mouse interfaces on vendor usage pages."""
+    """Enumerate HID devices and return likely MCHOSE battery-report interfaces."""
     results = []
     seen_paths = set()
+
+    allowed_pages = set(USAGE_PAGES)
+    if IS_LINUX:
+        # Some Linux hidapi backends expose vendor pages as 0x0000.
+        allowed_pages.update(_LINUX_FALLBACK_USAGE_PAGES)
+
     for vid in ALL_VIDS:
         for dev in hid.enumerate(vid):
-            if dev["usage_page"] in USAGE_PAGES and dev["path"] not in seen_paths:
+            usage_page = dev.get("usage_page", 0)
+            if usage_page in allowed_pages and dev["path"] not in seen_paths:
                 seen_paths.add(dev["path"])
                 results.append(dev)
-    results.sort(key=lambda d: (d["usage_page"] != 0xFF01, d["usage_page"]))
+
+    def _sort_key(d: dict) -> tuple:
+        usage_page = d.get("usage_page", 0)
+        iface = d.get("interface_number", 999)
+        return (usage_page != 0xFF01, usage_page == 0x0000, iface)
+
+    results.sort(key=_sort_key)
     return results
 
 
@@ -170,11 +257,11 @@ def find_wired_mchose() -> dict | None:
     for vid in ALL_VIDS:
         for dev in hid.enumerate(vid):
             name = dev.get("product_string") or ""
-            if "MCHOSE" in name.upper():
-                if best is None or dev["usage_page"] == 0xFF01:
-                    best = {"name": name, "path": dev["path"]}
-                    if dev["usage_page"] == 0xFF01:
-                        return best
+            usage_page = dev.get("usage_page", 0)
+            if best is None:
+                best = {"name": name or "MCHOSE", "path": dev["path"]}
+            if usage_page == 0xFF01:
+                return {"name": name or "MCHOSE", "path": dev["path"]}
     return best
 
 
@@ -228,7 +315,20 @@ def query_battery(path: bytes) -> dict | None:
             "charge_status": charge_status,
         }
     except Exception as e:
-        print(f"  [!] HID error: {e}")
+        global _hid_permission_hint_shown
+        err = str(e)
+        print(f"  [!] HID error: {err}")
+        if (IS_LINUX and "open failed" in err.lower()
+                and not _hid_permission_hint_shown):
+            _hid_permission_hint_shown = True
+            print("  [!] Linux HID access is blocked for current user.")
+            if HID_BACKEND == "hid":
+                print("      Detected backend: hid/libusb. On Linux this may fail even with hidraw permissions.")
+                print("      Install/use a build with hidraw backend, or ensure hidraw module is available.")
+            else:
+                print("      Create a udev rule, then replug mouse/dongle and retry.")
+                print("      Example rule: /etc/udev/rules.d/99-mchose.rules")
+                print("      KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3837\", MODE=\"0666\", TAG+=\"uaccess\"")
         return None
 
 
@@ -294,66 +394,138 @@ def pick_model() -> str:
         print("Invalid selection, try again.")
 
 
-# ── Windows notification ───────────────────────────────────────────────────
+# ── Desktop notifications ──────────────────────────────────────────────────
 
 def notify_windows(title: str, message: str, sound: bool = True):
-    """Show a Windows toast notification."""
-    from winotify import Notification, audio
-    toast = Notification(
-        app_id="MouseWatch",
-        title=title,
-        msg=message,
-        duration="long",
-    )
-    toast.set_audio(audio.Default if sound else audio.Silent, loop=False)
-    toast.show()
+    """Show a desktop notification on supported platforms."""
+    if IS_WINDOWS:
+        from winotify import Notification, audio
+
+        toast = Notification(
+            app_id="MouseWatch",
+            title=title,
+            msg=message,
+            duration="long",
+        )
+        toast.set_audio(audio.Default if sound else audio.Silent, loop=False)
+        toast.show()
+        return
+
+    if IS_LINUX:
+        # notify-send is widely available on Linux desktop environments.
+        try:
+            subprocess.run(["notify-send", title, message], check=False)
+        except FileNotFoundError:
+            print(f"{title}: {message}")
+        return
+
+    print(f"{title}: {message}")
 
 
 # ── Icon generation ────────────────────────────────────────────────────────
 
-def _battery_color(level: int, charging: bool) -> str:
-    """Return hex color based on battery level and charging state."""
-    if charging:
-        return "#4FC3F7"  # light blue
-    if level > 50:
+def _battery_color(level: int, threshold: int) -> str:
+    """Return hex color based on the configured battery threshold."""
+    if level > threshold:
         return "#4CAF50"  # green
-    if level > 20:
-        return "#FFC107"  # yellow/amber
     return "#F44336"  # red
 
 
-def create_battery_icon(level: int, charging: bool):
-    """Generate a 64x64 PIL Image showing battery percentage."""
+def create_battery_icon(level: int, threshold: int):
+    """Generate a 64x64 PIL Image showing battery percentage in a colored ring."""
     from PIL import Image, ImageDraw, ImageFont
 
-    size = 64
+    target_size = 64
+    size = 256
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    color = _battery_color(level, charging)
+    color = _battery_color(level, threshold)
 
-    # Draw filled circle background
-    draw.ellipse([2, 2, size - 3, size - 3], fill=color)
+    # Draw a very thin circular outline so the badge reads like a narrow tray indicator.
+    outer_box = [32, 32, size - 33, size - 33]
+    draw.ellipse(outer_box, outline=color, width=4)
 
     # Draw percentage text
     text = str(level)
     try:
-        font = ImageFont.truetype("arial.ttf", 26 if level < 100 else 20)
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 116 if level < 100 else 92)
     except OSError:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("arial.ttf", 116 if level < 100 else 92)
+        except OSError:
+            font = ImageFont.load_default()
 
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     tx = (size - tw) // 2 - bbox[0]
     ty = (size - th) // 2 - bbox[1]
-    draw.text((tx, ty), text, fill="white", font=font)
+    draw.text(
+        (tx, ty),
+        text,
+        fill=(255, 255, 255, 255),
+        font=font,
+        stroke_width=3,
+        stroke_fill=(0, 0, 0, 220),
+    )
 
-    # Charging indicator: small lightning bolt in bottom-right
-    if charging:
-        bolt = [(46, 38), (50, 38), (48, 44), (52, 44), (45, 56), (48, 47), (44, 47)]
-        draw.polygon(bolt, fill="white")
+    return img.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
-    return img
+
+if not IS_WINDOWS:
+    def create_qt_battery_icon(level: int, threshold: int) -> "QIcon":
+        """Convert the generated PIL badge into a Qt icon."""
+        app = QApplication.instance() or QApplication([])
+        from PIL import Image as PILImage
+        icon = QIcon()
+        for size in (16, 22, 24, 32, 48, 64):
+            image = create_battery_icon(level, threshold).resize((size, size), PILImage.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            qimage = QImage.fromData(buffer.getvalue(), "PNG")
+            icon.addPixmap(QPixmap.fromImage(qimage))
+        return icon
+
+
+if IS_WINDOWS:
+    def create_windows_battery_icon(level: int, threshold: int):
+        """Generate a Windows tray icon matching the Linux thin-circle style.
+
+        Rendered at 64×64 (the size pystray uses on Windows) so the 3px outline
+        maps to roughly 1px at the 20-32px notification-area icon size.
+        """
+        from PIL import Image, ImageDraw, ImageFont
+
+        size = 64
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        color = _battery_color(level, threshold)
+
+        # Thin outline — 3px at 64px ≈ 1px at the ~20px tray display size.
+        draw.ellipse([1, 1, size - 2, size - 2], outline=color, width=3)
+
+        text = str(level)
+        font_size = 45 if level < 100 else 36
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except OSError:
+            font = ImageFont.load_default()
+
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tx = (size - tw) // 2 - bbox[0]
+        ty = (size - th) // 2 - bbox[1]
+        draw.text(
+            (tx, ty),
+            text,
+            fill=(255, 255, 255, 255),
+            font=font,
+            stroke_width=1,
+            stroke_fill=(0, 0, 0, 200),
+        )
+
+        return img
 
 
 # ── Settings window ────────────────────────────────────────────────────────
@@ -421,8 +593,9 @@ class SettingsWindow:
             row=row, column=0, columnspan=2, sticky="w", pady=4)
 
         row += 1
+        startup_label = "Start with Windows" if IS_WINDOWS else "Start on login"
         self._startup_var = tk.BooleanVar(value=_startup_shortcut_exists())
-        ttk.Checkbutton(frame, text="Start with Windows",
+        ttk.Checkbutton(frame, text=startup_label,
                          variable=self._startup_var).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=4)
 
@@ -509,10 +682,13 @@ class DebugWindow:
 
     def _refresh(self):
         app = self._tray_app
+        snapshot = app.refresh_debug_snapshot()
         lines = []
         lines.append(f"Model:   MCHOSE {app.model}")
         lines.append(f"Battery: {app.level}%")
         lines.append(f"Status:  {'Charging' if app.charging else 'Wireless'}")
+        if app._last_debug_refresh_time:
+            lines.append(f"Refreshed: {app._last_debug_refresh_time}")
         lines.append("")
         lines.append("── Last E2 Input Report ──")
         if app._last_e2_time:
@@ -536,6 +712,12 @@ class DebugWindow:
         else:
             lines.append("  No E2 reports received yet.")
 
+        lines.append("")
+        if snapshot is None:
+            lines.append("Manual refresh: no response")
+        else:
+            lines.append(f"Manual refresh: battery {snapshot['battery_level']}%")
+
         import tkinter as tk
         self._text.config(state="normal")
         self._text.delete("1.0", tk.END)
@@ -545,6 +727,449 @@ class DebugWindow:
     def _on_close(self):
         DebugWindow._instance = None
         self._root.destroy()
+
+
+if not IS_WINDOWS:
+  class QtSettingsDialog(QDialog):
+    """Qt settings dialog for MouseWatch."""
+
+    def __init__(self, tray_app: "QtTrayApp"):
+        super().__init__()
+        self._tray_app = tray_app
+        self.setWindowTitle("MouseWatch Settings")
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._threshold_spin = QSpinBox()
+        self._threshold_spin.setRange(1, 100)
+        self._threshold_spin.setValue(tray_app.threshold)
+        form.addRow("Battery threshold (%):", self._threshold_spin)
+
+        self._reminder_spin = QSpinBox()
+        self._reminder_spin.setRange(60, 3600)
+        self._reminder_spin.setValue(tray_app.reminder_interval)
+        form.addRow("Reminder interval (s):", self._reminder_spin)
+
+        self._poll_spin = QSpinBox()
+        self._poll_spin.setRange(30, 3600)
+        self._poll_spin.setValue(tray_app.interval)
+        form.addRow("Poll interval (s):", self._poll_spin)
+
+        self._sound_check = QCheckBox("Notification sound")
+        self._sound_check.setChecked(tray_app.notification_sound)
+        form.addRow(self._sound_check)
+
+        self._device_check = QCheckBox("Device connect/disconnect notifications")
+        self._device_check.setChecked(tray_app.device_notifications)
+        form.addRow(self._device_check)
+
+        self._startup_check = QCheckBox(
+            "Start with Windows" if IS_WINDOWS else "Start on login"
+        )
+        self._startup_check.setChecked(_startup_shortcut_exists())
+        form.addRow(self._startup_check)
+
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._save_button = QPushButton("Save")
+        self._cancel_button = QPushButton("Cancel")
+        self._save_button.clicked.connect(self._on_save)
+        self._cancel_button.clicked.connect(self.close)
+        button_row.addStretch(1)
+        button_row.addWidget(self._save_button)
+        button_row.addWidget(self._cancel_button)
+        layout.addLayout(button_row)
+
+    def _on_save(self):
+        settings = {
+            "threshold": self._threshold_spin.value(),
+            "reminder_interval": self._reminder_spin.value(),
+            "poll_interval": self._poll_spin.value(),
+            "notification_sound": self._sound_check.isChecked(),
+            "device_notifications": self._device_check.isChecked(),
+            "start_with_windows": self._startup_check.isChecked(),
+        }
+        save_settings(settings)
+        self._tray_app.apply_settings(settings)
+        _set_startup(settings["start_with_windows"])
+        self.close()
+
+  class QtDebugDialog(QDialog):
+    """Qt debug dialog showing raw HID data."""
+
+    def __init__(self, tray_app: "QtTrayApp"):
+        super().__init__()
+        self._tray_app = tray_app
+        self.setWindowTitle("MouseWatch Debug")
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(self)
+        self._text = QPlainTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setMinimumSize(640, 360)
+        layout.addWidget(self._text)
+
+        button_row = QHBoxLayout()
+        self._refresh_button = QPushButton("Refresh")
+        self._close_button = QPushButton("Close")
+        self._refresh_button.clicked.connect(self.refresh)
+        self._close_button.clicked.connect(self.close)
+        button_row.addStretch(1)
+        button_row.addWidget(self._refresh_button)
+        button_row.addWidget(self._close_button)
+        layout.addLayout(button_row)
+
+        self.refresh()
+
+    def refresh(self):
+        app = self._tray_app
+        snapshot = app.refresh_debug_snapshot()
+        lines = []
+        lines.append(f"Model:   MCHOSE {app.model}")
+        lines.append(f"Battery: {app.level}%")
+        lines.append(f"Status:  {'Charging' if app.charging else 'Wireless'}")
+        if app._last_debug_refresh_time:
+            lines.append(f"Refreshed: {app._last_debug_refresh_time}")
+        lines.append("")
+        lines.append("Last E2 Input Report")
+        if app._last_e2_time:
+            lines.append(f"Time:    {app._last_e2_time}")
+            raw = app._last_e2_raw
+            dec = app._last_e2_decoded
+            if raw is not None:
+                lines.append(f"Raw:     {' '.join(f'{b:02X}' for b in raw)}")
+            if dec is not None:
+                lines.append(f"Decoded: {' '.join(f'{b:02X}' for b in dec)}")
+                lines.append("")
+                if len(dec) >= 6:
+                    lines.append(f"  [0] Report ID:    0x{dec[0]:02X}")
+                    lines.append(f"  [1] Notification: 0x{dec[1]:02X}")
+                    lines.append(f"  [2] Sub-type hi:  0x{dec[2]:02X}")
+                    lines.append(f"  [3] Sub-type lo:  0x{dec[3]:02X}")
+                    lines.append(f"  [4] chargeStatus: {dec[4]}")
+                    lines.append(f"  [5] batteryLevel: {dec[5]}%")
+        else:
+            lines.append("No E2 reports received yet.")
+
+        lines.append("")
+        if snapshot is None:
+            lines.append("Manual refresh: no response")
+        else:
+            lines.append(f"Manual refresh: battery {snapshot['battery_level']}%")
+
+        self._text.setPlainText("\n".join(lines))
+
+  class QtTrayApp(QObject):
+    """Qt system tray application for MouseWatch."""
+
+    status_changed = Signal(int, bool, str)
+    notification_requested = Signal(str, str)
+
+    def __init__(self, model: str, hid_path: bytes, initial_resp: dict,
+                 settings: dict):
+        super().__init__()
+        self.model = model
+        self.hid_path = hid_path
+        self.threshold = settings["threshold"]
+        self.interval = settings["poll_interval"]
+        self.reminder_interval = settings["reminder_interval"]
+        self.notification_sound = settings["notification_sound"]
+        self.device_notifications = settings["device_notifications"]
+        self.notified_at = None
+        self._last_notify_time = 0
+        self._notified_full = False
+        self.level = initial_resp["battery_level"]
+        self.charging = (initial_resp["charge_status"] != 0
+                         or initial_resp["connect_mode"] == 0)
+        self.status_text = self._status_text()
+        self._stop_event = threading.Event()
+        self._poll_interrupt = threading.Event()
+        self._last_e2_raw = None
+        self._last_e2_decoded = None
+        self._last_e2_time = None
+        self._last_debug_refresh_time = None
+        self._settings_dialog = None
+        self._debug_dialog = None
+
+        _existing = QApplication.instance()
+        if isinstance(_existing, QApplication):
+            _app = _existing
+        else:
+            _app = QApplication(sys.argv)
+        self._app: QApplication = _app  # type: ignore[assignment]
+        self._app.setApplicationName("MouseWatch")
+        self._app.setQuitOnLastWindowClosed(False)
+
+        self.tray = QSystemTrayIcon()
+        self.tray.setVisible(False)
+        self.tray.activated.connect(self._on_activated)
+
+        self._menu = QMenu()
+        self._status_action = QAction("Status", self)
+        self._settings_action = QAction("Settings", self)
+        self._debug_action = QAction("Debug", self)
+        self._quit_action = QAction("Quit", self)
+        self._status_action.triggered.connect(self._on_status)
+        self._settings_action.triggered.connect(self._on_settings)
+        self._debug_action.triggered.connect(self._on_debug)
+        self._quit_action.triggered.connect(self._on_quit)
+        self._menu.addAction(self._status_action)
+        self._menu.addAction(self._settings_action)
+        self._menu.addAction(self._debug_action)
+        self._menu.addSeparator()
+        self._menu.addAction(self._quit_action)
+        self.tray.setContextMenu(self._menu)
+
+        self.status_changed.connect(self._apply_status)
+        self.notification_requested.connect(self._show_notification)
+        self._apply_status(self.level, self.charging, self.status_text)
+
+    def _status_text(self) -> str:
+        status = "Charging" if self.charging else "Wireless"
+        if self.level == 0 and self.charging:
+            return f"MCHOSE {self.model} - Charging"
+        return f"MCHOSE {self.model} - {self.level}% ({status})"
+
+    def apply_settings(self, settings: dict):
+        self.threshold = settings["threshold"]
+        self.reminder_interval = settings["reminder_interval"]
+        self.notification_sound = settings["notification_sound"]
+        self.device_notifications = settings["device_notifications"]
+        if self.interval != settings["poll_interval"]:
+            self.interval = settings["poll_interval"]
+            self._poll_interrupt.set()
+
+    def _apply_status(self, level: int, charging: bool, status_text: str):
+        self.level = level
+        self.charging = charging
+        self.status_text = status_text
+        self.tray.setIcon(create_qt_battery_icon(self.level, self.threshold))
+        self.tray.setToolTip(self.status_text)
+        self.tray.setVisible(True)
+
+    def _show_notification(self, title: str, message: str):
+        # Run notify-send in a daemon thread so it never blocks the Qt event
+        # loop and never causes QSystemTrayIcon to temporarily swap the icon.
+        def _send():
+            try:
+                subprocess.run(["notify-send", title, message], check=False)
+            except FileNotFoundError:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _notify(self, title: str, message: str):
+        self.notification_requested.emit(title, message)
+
+    def _on_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._on_status()
+
+    def _on_status(self, checked: bool = False):
+        msg = self._refresh_status()
+        self._notify("MouseWatch", msg)
+
+    def _on_settings(self, checked: bool = False):
+        dialog = QtSettingsDialog(self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._settings_dialog = dialog
+
+    def _on_debug(self, checked: bool = False):
+        dialog = QtDebugDialog(self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._debug_dialog = dialog
+
+    def _on_quit(self, checked: bool = False):
+        self._stop_event.set()
+        self._poll_interrupt.set()
+        self.tray.hide()
+        self._app.quit()
+
+    def _refresh_status(self) -> str:
+        resp = query_battery(self.hid_path)
+        for _ in range(5):
+            if resp is not None:
+                break
+            time.sleep(2)
+            resp = query_battery(self.hid_path)
+
+        if resp is None:
+            return "Failed to read battery status"
+
+        level = resp["battery_level"]
+        charging = (resp["charge_status"] != 0
+                    or resp["connect_mode"] == 0)
+        status_text = f"MCHOSE {self.model} - {level}% ({'Charging' if charging else 'Wireless'})"
+        if level == 0 and charging:
+            status_text = f"MCHOSE {self.model} - Charging"
+        self.status_changed.emit(level, charging, status_text)
+        return f"{status_text}\nUpdated at {time.strftime('%H:%M:%S')}"
+
+    def refresh_debug_snapshot(self) -> dict | None:
+        """Force a fresh HID read for the debug dialog and update the visible state."""
+        resp = query_battery(self.hid_path)
+        for _ in range(5):
+            if resp is not None:
+                break
+            time.sleep(2)
+            resp = query_battery(self.hid_path)
+
+        self._last_debug_refresh_time = time.strftime("%H:%M:%S")
+        if resp is None:
+            return None
+
+        self.level = resp["battery_level"]
+        self.charging = (resp["charge_status"] != 0
+                         or resp["connect_mode"] == 0)
+        self.status_text = self._status_text()
+        self.status_changed.emit(self.level, self.charging, self.status_text)
+        return resp
+
+    def _input_listener(self):
+        while not self._stop_event.is_set():
+            try:
+                dev = hid.device()
+                dev.open_path(self.hid_path)
+                dev.set_nonblocking(False)
+            except Exception:
+                if self._stop_event.wait(5):
+                    break
+                continue
+
+            try:
+                while not self._stop_event.is_set():
+                    raw = dev.read(64, timeout_ms=1000)
+                    if not raw:
+                        continue
+
+                    decoded = xor_decode(bytes(raw))
+                    self._last_e2_raw = list(raw)
+                    self._last_e2_decoded = list(decoded)
+                    self._last_e2_time = time.strftime("%H:%M:%S")
+
+                    if len(decoded) < 6 or decoded[1] != 0xE2:
+                        continue
+
+                    charge_status = decoded[4]
+                    battery_level = decoded[5]
+                    if battery_level == 0 or battery_level > 100:
+                        continue
+
+                    old_charging = self.charging
+                    self.level = battery_level
+                    self.charging = charge_status != 0
+                    self.status_text = self._status_text()
+                    self.status_changed.emit(self.level, self.charging, self.status_text)
+
+                    if self.charging != old_charging and self.device_notifications:
+                        if self.charging:
+                            msg = f"MCHOSE {self.model} is charging ({self.level}%)"
+                        else:
+                            msg = f"MCHOSE {self.model} unplugged ({self.level}%)"
+                        self._notify("MouseWatch", msg)
+
+                    if self.level == 100 and self.charging and not self._notified_full:
+                        self._notified_full = True
+                        self._notify(
+                            "MouseWatch - Fully Charged",
+                            f"MCHOSE {self.model} is fully charged",
+                        )
+                    elif not self.charging or self.level < 100:
+                        self._notified_full = False
+
+            finally:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+                if not self._stop_event.is_set():
+                    self._stop_event.wait(2)
+
+    def _device_watcher(self):
+        known_paths = {d["path"] for d in find_mchose_devices()}
+        while not self._stop_event.wait(5):
+            current_paths = {d["path"] for d in find_mchose_devices()}
+            if current_paths != known_paths:
+                added = current_paths - known_paths
+                removed = known_paths - current_paths
+                known_paths = current_paths
+                self._poll_interrupt.set()
+                if self.device_notifications:
+                    if added and removed:
+                        msg = "Device reconnected"
+                    elif added:
+                        msg = "Device connected"
+                    else:
+                        msg = "Device disconnected"
+                    self._notify("MouseWatch", msg)
+
+    def _poll_loop(self):
+        while True:
+            self._poll_interrupt.wait(self.interval)
+            if self._stop_event.is_set():
+                break
+            self._poll_interrupt.clear()
+
+            resp = query_battery(self.hid_path)
+            for _ in range(5):
+                if resp is not None:
+                    break
+                time.sleep(2)
+                resp = query_battery(self.hid_path)
+            if resp is None:
+                continue
+
+            self.level = resp["battery_level"]
+            self.charging = (resp["charge_status"] != 0
+                             or resp["connect_mode"] == 0)
+            self.status_text = self._status_text()
+            self.status_changed.emit(self.level, self.charging, self.status_text)
+
+            if self.level == 100 and self.charging and not self._notified_full:
+                self._notified_full = True
+                self._notify(
+                    "MouseWatch - Fully Charged",
+                    f"MCHOSE {self.model} is fully charged",
+                )
+            elif not self.charging or self.level < 100:
+                self._notified_full = False
+
+            now = time.time()
+            if (self.level <= self.threshold and not self.charging
+                    and (now - self._last_notify_time) >= self.reminder_interval):
+                self._last_notify_time = now
+                self._notify(
+                    "MouseWatch - Low Battery",
+                    f"MCHOSE {self.model} battery is at {self.level}%",
+                )
+            elif self.level > self.threshold:
+                self._last_notify_time = 0
+
+    def run(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("System tray is not available in this desktop session.")
+            sys.exit(1)
+
+        self.tray.show()
+
+        poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        poll_thread.start()
+
+        input_thread = threading.Thread(target=self._input_listener, daemon=True)
+        input_thread.start()
+
+        watcher_thread = threading.Thread(target=self._device_watcher, daemon=True)
+        watcher_thread.start()
+
+        self._app.exec()
 
 
 # ── System tray ────────────────────────────────────────────────────────────
@@ -574,15 +1199,20 @@ class TrayApp:
         self._last_e2_raw = None
         self._last_e2_decoded = None
         self._last_e2_time = None
+        self._menu_supported = True
+        self._fallback_ui_started = False
+        self._last_debug_refresh_time = None
 
     def _status_text(self) -> str:
         status = "Charging" if self.charging else "Wireless"
         if self.level == 0 and self.charging:
-            return f"MCHOSE {self.model} — Charging"
-        return f"MCHOSE {self.model} — {self.level}% ({status})"
+            return f"MCHOSE {self.model} - Charging"
+        return f"MCHOSE {self.model} - {self.level}% ({status})"
 
     def _create_menu(self):
         import pystray
+        if not self._menu_supported:
+            return None
         return pystray.Menu(
             pystray.MenuItem("Status", self._on_status, default=True),
             pystray.MenuItem("Settings", self._on_settings),
@@ -590,7 +1220,8 @@ class TrayApp:
             pystray.MenuItem("Quit", self._on_quit),
         )
 
-    def _on_status(self, icon, item):
+    def _refresh_status(self) -> str:
+        """Refresh battery state and return a user-facing status message."""
         resp = query_battery(self.hid_path)
         for _ in range(5):
             if resp is not None:
@@ -599,15 +1230,19 @@ class TrayApp:
             resp = query_battery(self.hid_path)
 
         if resp is None:
-            msg = "Failed to read battery status"
-        else:
-            self.level = resp["battery_level"]
-            self.charging = (resp["charge_status"] != 0
-                             or resp["connect_mode"] == 0)
-            self.status_text = self._status_text()
-            self.icon.icon = create_battery_icon(self.level, self.charging)
+            return "Failed to read battery status"
+
+        self.level = resp["battery_level"]
+        self.charging = (resp["charge_status"] != 0
+                         or resp["connect_mode"] == 0)
+        self.status_text = self._status_text()
+        if self.icon:
+            self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
             self.icon.title = self.status_text
-            msg = f"{self.status_text}\nUpdated at {time.strftime('%H:%M:%S')}"
+        return f"{self.status_text}\nUpdated at {time.strftime('%H:%M:%S')}"
+
+    def _on_status(self, icon, item):
+        msg = self._refresh_status()
 
         try:
             notify_windows("MouseWatch", msg, sound=self.notification_sound)
@@ -626,6 +1261,81 @@ class TrayApp:
         self._stop_event.set()
         self._poll_interrupt.set()
         icon.stop()
+
+    def _on_quit_direct(self):
+        self._stop_event.set()
+        self._poll_interrupt.set()
+        if self.icon:
+            self.icon.stop()
+
+    def refresh_debug_snapshot(self) -> dict | None:
+        """Force a fresh HID read for the debug dialog and update visible state."""
+        resp = query_battery(self.hid_path)
+        for _ in range(5):
+            if resp is not None:
+                break
+            time.sleep(2)
+            resp = query_battery(self.hid_path)
+
+        self._last_debug_refresh_time = time.strftime("%H:%M:%S")
+        if resp is None:
+            return None
+
+        self.level = resp["battery_level"]
+        self.charging = (resp["charge_status"] != 0
+                         or resp["connect_mode"] == 0)
+        self.status_text = self._status_text()
+        if self.icon:
+            self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
+            self.icon.title = self.status_text
+        return resp
+
+    def _run_fallback_control_window(self):
+        """Show controls when tray backend cannot render context menus."""
+        if self._fallback_ui_started:
+            return
+        self._fallback_ui_started = True
+
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("MouseWatch")
+        root.resizable(False, False)
+
+        frame = ttk.Frame(root, padding=12)
+        frame.grid(sticky="nsew")
+
+        status_var = tk.StringVar(value=self.status_text)
+        ttk.Label(frame, textvariable=status_var).grid(row=0, column=0, columnspan=2,
+                                                        sticky="w", pady=(0, 8))
+
+        def refresh_click():
+            msg = self._refresh_status()
+            status_var.set(self.status_text)
+            try:
+                notify_windows("MouseWatch", msg, sound=self.notification_sound)
+            except Exception:
+                pass
+
+        ttk.Button(frame, text="Refresh", command=refresh_click).grid(
+            row=1, column=0, sticky="ew", padx=(0, 4), pady=4)
+        ttk.Button(frame, text="Settings", command=lambda: self._on_settings(None, None)).grid(
+            row=1, column=1, sticky="ew", padx=(4, 0), pady=4)
+        ttk.Button(frame, text="Debug", command=lambda: self._on_debug(None, None)).grid(
+            row=2, column=0, sticky="ew", padx=(0, 4), pady=4)
+        ttk.Button(frame, text="Quit", command=self._on_quit_direct).grid(
+            row=2, column=1, sticky="ew", padx=(4, 0), pady=4)
+
+        def ticker():
+            status_var.set(self.status_text)
+            if not self._stop_event.is_set():
+                root.after(1000, ticker)
+            else:
+                root.destroy()
+
+        root.after(1000, ticker)
+        root.mainloop()
 
     def _input_listener(self):
         """Background thread that listens for 0xE2 input reports (real-time battery/charge updates)."""
@@ -668,7 +1378,7 @@ class TrayApp:
                     self.status_text = self._status_text()
 
                     if self.icon:
-                        self.icon.icon = create_battery_icon(self.level, self.charging)
+                        self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
                         self.icon.title = self.status_text
 
                     # Notify on charge state change
@@ -754,7 +1464,7 @@ class TrayApp:
             self.status_text = self._status_text()
 
             # Update icon and tooltip
-            self.icon.icon = create_battery_icon(self.level, self.charging)
+            self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
             self.icon.title = self.status_text
 
             # Fully charged notification (once per charge cycle)
@@ -790,13 +1500,21 @@ class TrayApp:
     def run(self):
         import pystray
 
-        image = create_battery_icon(self.level, self.charging)
+        self._menu_supported = bool(getattr(pystray.Icon, "HAS_MENU", True))
+
+        image = create_windows_battery_icon(self.level, self.threshold)
         self.icon = pystray.Icon(
             "MouseWatch",
             image,
             title=self.status_text,
             menu=self._create_menu(),
         )
+
+        if IS_LINUX and not self._menu_supported:
+            print("Tray backend has no menu support on this Linux session.")
+            print("Opening MouseWatch control window for Settings/Debug/Quit.")
+            threading.Thread(target=self._run_fallback_control_window,
+                             daemon=True).start()
 
         poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         poll_thread.start()
@@ -891,6 +1609,11 @@ def main():
     )
     args = parser.parse_args()
 
+    if (IS_LINUX and not args.nogui
+            and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
+        print("No desktop session detected; switching to CLI mode (--nogui).")
+        args.nogui = True
+
     # Load persisted settings, then let CLI args override
     settings = load_settings()
     if args.threshold is not None:
@@ -931,13 +1654,17 @@ def main():
                 print(f"  Battery:  {resp['battery_level']}%")
                 charging = resp["charge_status"] != 0 or resp["connect_mode"] == 0
                 print(f"  Status:   {'Charging' if charging else 'Wireless'}")
-                print()
-                confirm = input("Is this correct? [Y/n] ").strip().lower()
-                if confirm and confirm != "y":
-                    model = pick_model()
-                    hid_path = None
+                if not args.once:
+                    print()
+                    confirm = input("Is this correct? [Y/n] ").strip().lower()
+                    if confirm and confirm != "y":
+                        model = pick_model()
+                        hid_path = None
             else:
                 print("  No MCHOSE mouse detected automatically.")
+                if args.once:
+                    print("  Hint: if you see 'HID error: open failed', fix Linux hidraw permissions first.")
+                    sys.exit(1)
                 model = pick_model()
     else:
         # GUI mode: silent auto-detection
@@ -1011,7 +1738,10 @@ def main():
         args.interval = settings["poll_interval"]
         run_cli(model, hid_path, args)
     else:
-        app = TrayApp(model, hid_path, resp, settings)
+        if IS_WINDOWS:
+            app = TrayApp(model, hid_path, resp, settings)
+        else:
+            app = QtTrayApp(model, hid_path, resp, settings)
         app.run()
 
 

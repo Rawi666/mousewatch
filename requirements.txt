@@ -1,4 +1,5 @@
 hidapi
-winotify
-pystray
+PySide6; sys_platform != "win32"
+winotify; sys_platform == "win32"
+pystray; sys_platform == "win32"
 Pillow

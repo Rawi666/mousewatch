@@ -1,6 +1,6 @@
 # MouseWatch
 
-Battery monitor for MCHOSE wireless mice. Runs as a Windows system tray application — the tray icon shows the current battery percentage and changes color based on level. Click the icon to refresh and see the latest status. Right-click for settings and other options.
+Battery monitor for MCHOSE wireless mice. Runs as a system tray application on Windows and Linux — the tray icon shows the current battery percentage as a circular badge. Right-click the icon for settings and other options.
 
 ## Supported mice
 
@@ -25,15 +25,20 @@ python mousewatch.py -m "L7 Ultra+" # skip auto-detection
 
 ## Settings
 
-Right-click the tray icon and select "Settings" to configure:
+Right-click the tray icon and select **Settings** to configure:
 
 - **Battery threshold** — percentage to trigger low battery alert (1-100%, default 20%)
 - **Reminder interval** — minimum time between repeated low battery notifications (default 300s)
 - **Poll interval** — how often to check the battery (default 300s)
-- **Notification sound** — toggle toast notification sound on/off
-- **Start with Windows** — automatically launch on login
+- **Notification sound** — toggle notification sound on/off (Windows only)
+- **Start with Windows / Start on login** — automatically launch on login
 
-Settings are saved to `%LOCALAPPDATA%\MouseWatch\settings.json` and persist across restarts. CLI arguments (`--threshold`, `--interval`) override saved settings when provided.
+Settings are saved and persist across restarts. CLI arguments (`--threshold`, `--interval`) override saved settings when provided.
+
+| Platform | Config path |
+|----------|-------------|
+| Windows | `%LOCALAPPDATA%\MouseWatch\settings.json` |
+| Linux | `~/.config/mousewatch/settings.json` |
 
 ## Notifications
 
@@ -46,13 +51,41 @@ Settings are saved to `%LOCALAPPDATA%\MouseWatch\settings.json` and persist acro
 
 If the mouse is connected via USB cable at startup (no dongle), the app launches in charging mode and updates in real-time via HID input reports. Battery percentage polling requires the 2.4GHz dongle.
 
+## Linux setup
+
+Add a udev rule so the app can access the HID device without root:
+
+```bash
+sudo tee /etc/udev/rules.d/98-mchose.rules > /dev/null <<'EOF'
+KERNEL=="hidraw*", ATTRS{idVendor}=="3837", MODE="0666", TAG+="uaccess"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Then replug the dongle and run the app normally.
+
 ## Install as startup app
 
+**Windows:**
 ```
 install.bat
 ```
-
 This builds a standalone `MouseWatch.exe` and adds it to Windows startup. Run `uninstall.bat` to remove.
+
+**Linux:** Use the **Start on login** toggle in Settings. This creates an XDG autostart entry at `~/.config/autostart/mousewatch.desktop`.
+
+## Platform differences
+
+| Feature | Windows | Linux |
+|---------|---------|-------|
+| Tray backend | pystray | PySide6 QSystemTrayIcon |
+| Context menu | pystray menu | Qt right-click menu |
+| Settings/Debug UI | tkinter | Qt dialogs |
+| Notifications | winotify toast | notify-send |
+| Config path | `%LOCALAPPDATA%` | `~/.config` (XDG) |
+| Login startup | `.lnk` in Startup folder | XDG autostart `.desktop` |
+| HID backend | hidapi/libusb | hidraw |
 
 ## How it works
 
