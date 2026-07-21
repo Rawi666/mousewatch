@@ -13,6 +13,22 @@ pip install -r requirements.txt
 python mousewatch.py
 ```
 
+Linux helper scripts:
+
+```bash
+./create_venv.sh
+./run.sh
+```
+
+`./run.sh` automatically creates the venv first if it does not exist.
+
+Optional custom venv path:
+
+```bash
+./create_venv.sh .venv
+./run.sh .venv
+```
+
 ## Usage
 
 ```
@@ -56,8 +72,11 @@ If the mouse is connected via USB cable at startup (no dongle), the app launches
 Add a udev rule so the app can access the HID device without root:
 
 ```bash
-sudo tee /etc/udev/rules.d/98-mchose.rules > /dev/null <<'EOF'
+sudo tee /etc/udev/rules.d/99-mchose.rules > /dev/null <<'EOF'
 KERNEL=="hidraw*", ATTRS{idVendor}=="3837", MODE="0666", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="41E4", MODE="0666", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0BDA", MODE="0666", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="5253", MODE="0666", TAG+="uaccess"
 EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger

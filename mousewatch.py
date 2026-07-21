@@ -10,7 +10,7 @@ Protocol reverse-engineered from the MCHOSE WebHID configurator.
 import argparse
 import json
 import os
-import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -107,23 +107,32 @@ def _startup_shortcut_path() -> str:
             "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
             "MouseWatch.lnk",
         )
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if not xdg_config:
+        xdg_config = os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(
-        os.path.expanduser("~"),
-        ".config",
+        xdg_config,
         "autostart",
         "mousewatch.desktop",
     )
 
 
+def _linux_applications_shortcut_path() -> str:
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    if not xdg_data:
+        xdg_data = os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(xdg_data, "applications", "mousewatch.desktop")
+
+
 def _startup_shortcut_exists() -> bool:
-    return os.path.exists(_startup_shortcut_path())
+    return os.path.lexists(_startup_shortcut_path())
 
 
 def _set_startup(enabled: bool):
     """Create or remove login startup entry for the current platform."""
     lnk_path = _startup_shortcut_path()
     if not enabled:
-        if os.path.exists(lnk_path):
+        if os.path.lexists(lnk_path):
             os.remove(lnk_path)
         return
 
@@ -150,12 +159,16 @@ def _set_startup(enabled: bool):
         return
 
     # XDG autostart for Linux desktop environments.
+    # The app will wait for the system tray to become available during autostart.
     os.makedirs(os.path.dirname(lnk_path), exist_ok=True)
+    app_launcher_path = _linux_applications_shortcut_path()
+    os.makedirs(os.path.dirname(app_launcher_path), exist_ok=True)
+
     if getattr(sys, "frozen", False):
-        exec_cmd = shlex.quote(sys.executable)
+        exec_cmd = f'"{sys.executable}" --autostart'
     else:
         script_path = os.path.abspath(sys.argv[0])
-        exec_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(script_path)}"
+        exec_cmd = f'"{sys.executable}" "{script_path}" --autostart'
 
     desktop = "\n".join([
         "[Desktop Entry]",
@@ -163,13 +176,25 @@ def _set_startup(enabled: bool):
         "Version=1.0",
         "Name=MouseWatch",
         "Comment=MCHOSE battery monitor",
+        f"TryExec={sys.executable}",
         f"Exec={exec_cmd}",
         "X-GNOME-Autostart-enabled=true",
+        "StartupNotify=false",
         "Terminal=false",
         "",
     ])
-    with open(lnk_path, "w", encoding="utf-8") as f:
+    with open(app_launcher_path, "w", encoding="utf-8") as f:
         f.write(desktop)
+
+    if os.path.lexists(lnk_path):
+        os.remove(lnk_path)
+
+    # Symlink keeps one canonical launcher file; copy is fallback for filesystems
+    # or desktop setups that do not allow symlinks here.
+    try:
+        os.symlink(app_launcher_path, lnk_path)
+    except OSError:
+        shutil.copyfile(app_launcher_path, lnk_path)
 
 # ── Device database ────────────────────────────────────────────────────────
 # All known MCHOSE vendor IDs (dongles may use any of these)
@@ -329,6 +354,9 @@ def query_battery(path: bytes) -> dict | None:
                 print("      Create a udev rule, then replug mouse/dongle and retry.")
                 print("      Example rule: /etc/udev/rules.d/99-mchose.rules")
                 print("      KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3837\", MODE=\"0666\", TAG+=\"uaccess\"")
+                print("      KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"41E4\", MODE=\"0666\", TAG+=\"uaccess\"")
+                print("      KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0BDA\", MODE=\"0666\", TAG+=\"uaccess\"")
+                print("      KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"5253\", MODE=\"0666\", TAG+=\"uaccess\"")
         return None
 
 
@@ -871,10 +899,11 @@ if not IS_WINDOWS:
     notification_requested = Signal(str, str)
 
     def __init__(self, model: str, hid_path: bytes, initial_resp: dict,
-                 settings: dict):
+                 settings: dict, is_autostart: bool = False):
         super().__init__()
         self.model = model
         self.hid_path = hid_path
+        self.is_autostart = is_autostart
         self.threshold = settings["threshold"]
         self.interval = settings["poll_interval"]
         self.reminder_interval = settings["reminder_interval"]
@@ -1154,7 +1183,16 @@ if not IS_WINDOWS:
                 self._last_notify_time = 0
 
     def run(self):
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+        if self.is_autostart:
+            # During autostart, wait up to 60 seconds for system tray to become available
+            for attempt in range(60):
+                if QSystemTrayIcon.isSystemTrayAvailable():
+                    break
+                time.sleep(1)
+            else:
+                print("System tray did not become available during autostart; exiting.")
+                sys.exit(1)
+        elif not QSystemTrayIcon.isSystemTrayAvailable():
             print("System tray is not available in this desktop session.")
             sys.exit(1)
 
@@ -1607,9 +1645,15 @@ def main():
         action="store_true",
         help="Run in CLI mode (no system tray)",
     )
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Running from autostart (GUI waits for tray availability)",
+    )
     args = parser.parse_args()
+    stdin_is_interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
 
-    if (IS_LINUX and not args.nogui
+    if (IS_LINUX and not args.nogui and not args.autostart
             and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
         print("No desktop session detected; switching to CLI mode (--nogui).")
         args.nogui = True
@@ -1654,7 +1698,7 @@ def main():
                 print(f"  Battery:  {resp['battery_level']}%")
                 charging = resp["charge_status"] != 0 or resp["connect_mode"] == 0
                 print(f"  Status:   {'Charging' if charging else 'Wireless'}")
-                if not args.once:
+                if stdin_is_interactive and not args.once:
                     print()
                     confirm = input("Is this correct? [Y/n] ").strip().lower()
                     if confirm and confirm != "y":
@@ -1664,6 +1708,10 @@ def main():
                 print("  No MCHOSE mouse detected automatically.")
                 if args.once:
                     print("  Hint: if you see 'HID error: open failed', fix Linux hidraw permissions first.")
+                    sys.exit(1)
+                if not stdin_is_interactive:
+                    print("  Cannot prompt for model selection in a non-interactive session.")
+                    print("  Re-run interactively or pass --model to force a specific mouse model.")
                     sys.exit(1)
                 model = pick_model()
     else:
@@ -1741,7 +1789,7 @@ def main():
         if IS_WINDOWS:
             app = TrayApp(model, hid_path, resp, settings)
         else:
-            app = QtTrayApp(model, hid_path, resp, settings)
+            app = QtTrayApp(model, hid_path, resp, settings, is_autostart=args.autostart)
         app.run()
 
 
