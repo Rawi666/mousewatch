@@ -341,7 +341,9 @@ def query_battery(path: bytes) -> dict | None:
         }
     except Exception as e:
         err = str(e)
-        print(f"  [!] HID error: {err}")
+        # Only log errors that aren't common disconnection scenarios
+        if "open failed" not in err.lower() and "read error" not in err.lower():
+            print(f"  [!] HID error: {err}")
         return None
 
 
@@ -613,18 +615,39 @@ class Common:
 
     def _input_listener(self):
         while not self._stop_event.is_set():
+            # Check if device path is still valid; if not, find the new one
+            current_devices = find_mchose_devices()
+            current_paths = {d["path"] for d in current_devices}
+
+            if self.hid_path not in current_paths:
+                # Device path is no longer valid; try to find a replacement
+                if current_paths:
+                    # Pick the first available device
+                    self.hid_path = list(current_paths)[0]
+                else:
+                    # No devices available; wait before retrying
+                    if self._stop_event.wait(5):
+                        break
+                    continue
+
             try:
                 dev = hid.device()
                 dev.open_path(self.hid_path)
                 dev.set_nonblocking(False)
-            except Exception:
-                if self._stop_event.wait(5):
+            except Exception as e:
+                # Device open failed; could be path is no longer valid
+                if self._stop_event.wait(2):
                     break
                 continue
 
             try:
                 while not self._stop_event.is_set():
-                    raw = dev.read(64, timeout_ms=1000)
+                    try:
+                        raw = dev.read(64, timeout_ms=1000)
+                    except Exception as read_err:
+                        # Read error typically means device was disconnected
+                        break
+
                     if not raw:
                         continue
 
@@ -672,6 +695,13 @@ class Common:
                 added = current_paths - known_paths
                 removed = known_paths - current_paths
                 known_paths = current_paths
+
+                # If our current device was removed, try to auto-switch to a new one
+                if self.hid_path in removed:
+                    if current_paths:
+                        # Switch to the first available device
+                        self.hid_path = list(current_paths)[0]
+
                 self._poll_interrupt.set()
                 if self.device_notifications:
                     if added and removed:
@@ -688,6 +718,17 @@ class Common:
             if self._stop_event.is_set():
                 break
             self._poll_interrupt.clear()
+
+            # Before querying, check if device path is still valid
+            current_devices = find_mchose_devices()
+            current_paths = {d["path"] for d in current_devices}
+            if self.hid_path not in current_paths:
+                # Current path is invalid; try to find a new one
+                if current_paths:
+                    self.hid_path = list(current_paths)[0]
+                else:
+                    # No devices available
+                    continue
 
             resp = Common.query_battery_retry(self.hid_path)
             if resp is None:
