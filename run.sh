@@ -15,4 +15,4 @@ if [[ ! -x "$VENV_PATH/bin/python" ]]; then
   "$SCRIPT_DIR/create_venv.sh" "$VENV_PATH"
 fi
 
-exec "$VENV_PATH/bin/python" "$SCRIPT_DIR/mousewatch.py"
+exec "$VENV_PATH/bin/python" "$SCRIPT_DIR/src/mousewatch/mousewatch.py"

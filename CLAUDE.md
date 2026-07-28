@@ -49,7 +49,7 @@ Battery monitor for MCHOSE wireless mice via HID protocol. Runs on Windows and L
 - Start on login (Linux): creates/removes `~/.config/autostart/mousewatch.desktop` (XDG autostart spec)
 
 ## Build
-- PyInstaller: `python -m PyInstaller --onefile --noconsole --name MouseWatch mousewatch.py`
+- PyInstaller: `python -m PyInstaller --onefile --noconsole --name MouseWatch src/mousewatch/mousewatch.py`
 - Use `python -m PyInstaller` not bare `pyinstaller` — Microsoft Store Python doesn't put scripts on PATH
 
 ## Key lessons

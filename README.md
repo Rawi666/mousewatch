@@ -32,11 +32,11 @@ Optional custom venv path:
 ## Usage
 
 ```
-python mousewatch.py                # auto-detect mouse, monitor in system tray
-python mousewatch.py --once         # print battery once and exit
-python mousewatch.py -t 15          # set low battery threshold to 15%
-python mousewatch.py -i 60          # poll every 60 seconds
-python mousewatch.py -m "L7 Ultra+" # skip auto-detection
+python src/mousewatch/mousewatch.py                # auto-detect mouse, monitor in system tray
+python src/mousewatch/mousewatch.py --once         # print battery once and exit
+python src/mousewatch/mousewatch.py -t 15          # set low battery threshold to 15%
+python src/mousewatch/mousewatch.py -i 60          # poll every 60 seconds
+python src/mousewatch/mousewatch.py -m "L7 Ultra+" # skip auto-detection
 ```
 
 ## Settings
