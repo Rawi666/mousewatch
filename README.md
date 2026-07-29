@@ -28,11 +28,37 @@ Linux helper scripts:
 
 `./run.sh` automatically creates the venv first if it does not exist.
 
+Windows helper scripts:
+
+```bat
+create_venv.bat
+run.bat
+```
+
+```powershell
+.\create_venv.ps1
+.\run.ps1
+```
+
+`run.bat` and `run.ps1` automatically create the venv first if it does not exist.
+
 Optional custom venv path:
 
 ```bash
 ./create_venv.sh .venv
 ./run.sh .venv
+```
+
+Windows custom venv path:
+
+```bat
+create_venv.bat .venv
+run.bat .venv
+```
+
+```powershell
+.\create_venv.ps1 .venv
+.\run.ps1 .venv
 ```
 
 ## Usage
