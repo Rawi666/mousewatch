@@ -2,6 +2,16 @@
 
 Battery monitor for supported wireless mice (MCHOSE and ATK). Runs as a system tray application on Windows and Linux - the tray icon shows the current battery percentage as a circular badge. Right-click the icon for settings and other options.
 
+## Screenshots
+
+Linux KDE
+
+![MouseWatch tray icon on Linux KDE](assets/screenshots/kde.png)
+
+Windows
+
+![MouseWatch tray icon on Windows](assets/screenshots/windows.png)
+
 ## Supported mice
 
 ### MCHOSE
