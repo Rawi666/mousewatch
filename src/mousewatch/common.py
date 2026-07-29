@@ -365,26 +365,23 @@ class Common:
                     self._notify("MouseWatch", msg)
 
     def _poll_loop(self):
+        consecutive_failures = 0
         while True:
             self._poll_interrupt.wait(self.interval)
             if self._stop_event.is_set():
                 break
             self._poll_interrupt.clear()
 
-            current_devices = self.protocol.discover_devices()
-            current_paths = {d["path"] for d in current_devices}
-            if self.hid_path not in current_paths:
-                replacement = self._pick_first_available_path(current_devices)
-                if replacement is not None:
-                    self.hid_path = replacement
-                else:
-                    self._set_disconnected_state()
-                    continue
-
             resp = self._recover_path_and_query()
             if resp is None:
-                self._set_disconnected_state()
+                consecutive_failures += 1
+                # Avoid brief '?' flicker on transient read failures during
+                # provider transitions/hotplug events.
+                if consecutive_failures >= 2:
+                    self._set_disconnected_state()
                 continue
+
+            consecutive_failures = 0
 
             self.device_online = True
             self.level, self.charging = Common.status_from_response(self.protocol, resp)

@@ -30,17 +30,17 @@ if not IS_WINDOWS:
             self._threshold_spin = QSpinBox()
             self._threshold_spin.setRange(1, 100)
             self._threshold_spin.setValue(tray_app.threshold)
-            form.addRow("Battery threshold (%):", self._threshold_spin)
+            form.addRow("Battery threshold (1-100%):", self._threshold_spin)
 
             self._reminder_spin = QSpinBox()
             self._reminder_spin.setRange(60, 3600)
             self._reminder_spin.setValue(tray_app.reminder_interval)
-            form.addRow("Reminder interval (s):", self._reminder_spin)
+            form.addRow("Reminder interval (60-3600 s):", self._reminder_spin)
 
             self._poll_spin = QSpinBox()
-            self._poll_spin.setRange(30, 3600)
+            self._poll_spin.setRange(20, 3600)
             self._poll_spin.setValue(tray_app.interval)
-            form.addRow("Poll interval (s):", self._poll_spin)
+            form.addRow("Poll interval (20-3600 s):", self._poll_spin)
 
             self._sound_check = QCheckBox("Notification sound")
             self._sound_check.setChecked(tray_app.notification_sound)

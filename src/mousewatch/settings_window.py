@@ -32,24 +32,24 @@ class SettingsWindow:
 
         row = 0
 
-        ttk.Label(frame, text="Battery threshold (%):").grid(
+        ttk.Label(frame, text="Battery threshold (1-100%):").grid(
             row=row, column=0, sticky="w", pady=4)
         self._threshold_var = tk.IntVar(value=tray_app.threshold)
         ttk.Spinbox(frame, from_=1, to=100, textvariable=self._threshold_var,
                     width=8).grid(row=row, column=1, sticky="w", pady=4)
 
         row += 1
-        ttk.Label(frame, text="Reminder interval (s):").grid(
+        ttk.Label(frame, text="Reminder interval (60-3600 s):").grid(
             row=row, column=0, sticky="w", pady=4)
         self._reminder_var = tk.IntVar(value=tray_app.reminder_interval)
         ttk.Spinbox(frame, from_=60, to=3600, textvariable=self._reminder_var,
                     width=8).grid(row=row, column=1, sticky="w", pady=4)
 
         row += 1
-        ttk.Label(frame, text="Poll interval (s):").grid(
+        ttk.Label(frame, text="Poll interval (20-3600 s):").grid(
             row=row, column=0, sticky="w", pady=4)
         self._poll_var = tk.IntVar(value=tray_app.interval)
-        ttk.Spinbox(frame, from_=30, to=3600, textvariable=self._poll_var,
+        ttk.Spinbox(frame, from_=20, to=3600, textvariable=self._poll_var,
                     width=8).grid(row=row, column=1, sticky="w", pady=4)
 
         row += 1
