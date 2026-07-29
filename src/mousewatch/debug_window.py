@@ -45,7 +45,11 @@ class DebugWindow:
     def _refresh(self):
         app = self._tray_app
         snapshot = app.refresh_debug_snapshot()
-        lines = Common.build_debug_lines(app, snapshot, section_title="── Last E2 Input Report ──")
+        lines = Common.build_debug_lines(
+            app,
+            snapshot,
+            section_title=f"── {app.protocol.input_section_title} ──",
+        )
 
         import tkinter as tk
         self._text.config(state="normal")

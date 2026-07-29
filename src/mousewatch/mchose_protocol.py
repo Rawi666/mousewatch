@@ -1,10 +1,16 @@
+"""MCHOSE HID protocol implementation.
+
+This module contains MCHOSE-specific discovery and battery query logic.
+Other mouse protocols (for example ATK) are implemented in `protocols.py`.
+"""
+
 import struct
-import subprocess
 import time
 
-from mw_platform import HID_BACKEND, IS_LINUX, IS_WINDOWS, hid
+from device_ids import MCHOSE_VENDOR_IDS
+from mw_platform import IS_LINUX, hid
 
-ALL_VIDS = [0x3837, 0x41E4, 0x0BDA, 0x5253]
+ALL_VIDS = list(MCHOSE_VENDOR_IDS)
 
 MOUSE_DB = {
     "M7": {"inner_pid": 0x0020},
@@ -182,35 +188,3 @@ def pick_model() -> str:
         except (ValueError, EOFError):
             pass
         print("Invalid selection, try again.")
-
-
-def notify_windows(title: str, message: str, sound: bool = True):
-    """Show a desktop notification on supported platforms."""
-    if IS_WINDOWS:
-        from winotify import Notification, audio
-
-        toast = Notification(
-            app_id="MouseWatch",
-            title=title,
-            msg=message,
-            duration="long",
-        )
-        toast.set_audio(audio.Default if sound else audio.Silent, loop=False)
-        toast.show()
-        return
-
-    if IS_LINUX:
-        try:
-            subprocess.run(["notify-send", title, message], check=False)
-        except FileNotFoundError:
-            print(f"{title}: {message}")
-        return
-
-    print(f"{title}: {message}")
-
-
-def safe_notify(title: str, message: str, sound: bool = True):
-    try:
-        notify_windows(title, message, sound=sound)
-    except Exception:
-        pass

@@ -1,10 +1,16 @@
 # MouseWatch
 
-Battery monitor for MCHOSE wireless mice. Runs as a system tray application on Windows and Linux — the tray icon shows the current battery percentage as a circular badge. Right-click the icon for settings and other options.
+Battery monitor for supported wireless mice (MCHOSE and ATK). Runs as a system tray application on Windows and Linux - the tray icon shows the current battery percentage as a circular badge. Right-click the icon for settings and other options.
 
 ## Supported mice
 
+### MCHOSE
+
 M7, M7 Pro, M7 Ultra, L7, L7 Pro, L7 Pro+, L7 Ultra, L7 Ultra+, A7, A7 Pro, A7 Ultra, A7 Ultra(RE), A7 V2 Pro, A7 V2 Pro+, A7 V2 Ultra, A7 V2 Ultra+, A7X Ultra, K7 Ultra, A5 V2 Ultra, AX5 V2, G3 Ultra 8K, G3 Ultra 4K
+
+### ATK
+
+A9 Plus
 
 ## Quick start
 
@@ -37,7 +43,17 @@ python src/mousewatch/mousewatch.py --once         # print battery once and exit
 python src/mousewatch/mousewatch.py -t 15          # set low battery threshold to 15%
 python src/mousewatch/mousewatch.py -i 60          # poll every 60 seconds
 python src/mousewatch/mousewatch.py -m "L7 Ultra+" # skip auto-detection
+python src/mousewatch/mousewatch.py --protocol atk --once --nogui
+python src/mousewatch/mousewatch.py --probe --protocol atk --nogui
 ```
+
+Protocol options:
+
+- `--protocol auto` (default): choose the first protocol that detects a supported device
+- `--protocol mchose`: force MCHOSE protocol
+- `--protocol atk`: force ATK protocol
+
+Probe mode (`--probe`) prints candidate HID interfaces, query results, and decoded protocol frames to help with protocol debugging.
 
 ## Settings
 
@@ -72,11 +88,12 @@ If the mouse is connected via USB cable at startup (no dongle), the app launches
 Add a udev rule so the app can access the HID device without root:
 
 ```bash
-sudo tee /etc/udev/rules.d/99-mchose.rules > /dev/null <<'EOF'
+sudo tee /etc/udev/rules.d/99-mousewatch.rules > /dev/null <<'EOF'
 KERNEL=="hidraw*", ATTRS{idVendor}=="3837", MODE="0666", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="41E4", MODE="0666", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="0BDA", MODE="0666", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="5253", MODE="0666", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="373B", MODE="0666", TAG+="uaccess"
 EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -112,4 +129,4 @@ Communicates with the mouse via HID through the 2.4GHz USB dongle. Uses two chan
 - **Feature reports** (`0x11 0x06`) — periodic polling for battery level and status
 - **Input reports** (`0xE2`) — real-time push notifications for charge state changes
 
-The protocol was reverse-engineered from the MCHOSE web configurator.
+MCHOSE protocol was reverse-engineered from the MCHOSE web configurator. ATK support is implemented with command/response framing derived from the `libatk-rs` protocol notes.

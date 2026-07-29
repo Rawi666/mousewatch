@@ -1,19 +1,20 @@
 import threading
 
 from common import Common
+from common import safe_notify
 from debug_window import DebugWindow
-from icon_factory import create_windows_battery_icon
+from icon_factory import create_windows_battery_icon, create_windows_unknown_battery_icon
 from mw_platform import IS_LINUX
 from settings_window import SettingsWindow
-from hid_protocol import safe_notify
 
 
 class TrayApp(Common):
     """System tray application for MouseWatch."""
 
-    def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
-                 settings: dict):
+    def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
+                 settings: dict, available_protocols: list | None = None):
         self.protocol = protocol
+        self.available_protocols = available_protocols or [protocol]
         self.model = model
         self.hid_path = hid_path
         self.threshold = settings["threshold"]
@@ -24,7 +25,13 @@ class TrayApp(Common):
         self.notified_at = None
         self._last_notify_time = 0
         self._notified_full = False
-        self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
+        if initial_resp is None:
+            self.level = 0
+            self.charging = False
+            self.device_online = False
+        else:
+            self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
+            self.device_online = bool(initial_resp.get("device_online", True))
         self.status_text = self._status_text()
         self._stop_event = threading.Event()
         self._poll_interrupt = threading.Event()
@@ -50,7 +57,10 @@ class TrayApp(Common):
 
     def _update_ui_status(self):
         if self.icon:
-            self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
+            if self.device_online:
+                self.icon.icon = create_windows_battery_icon(self.level, self.threshold)
+            else:
+                self.icon.icon = create_windows_unknown_battery_icon()
             self.icon.title = self.status_text
 
     def _notify(self, title: str, message: str):
@@ -139,7 +149,10 @@ class TrayApp(Common):
 
         self._menu_supported = bool(getattr(pystray.Icon, "HAS_MENU", True))
 
-        image = create_windows_battery_icon(self.level, self.threshold)
+        if self.device_online:
+            image = create_windows_battery_icon(self.level, self.threshold)
+        else:
+            image = create_windows_unknown_battery_icon()
         self.icon = pystray.Icon(
             "MouseWatch",
             image,
@@ -155,8 +168,9 @@ class TrayApp(Common):
         poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         poll_thread.start()
 
-        input_thread = threading.Thread(target=self._input_listener, daemon=True)
-        input_thread.start()
+        if self.protocol.supports_input_listener:
+            input_thread = threading.Thread(target=self._input_listener, daemon=True)
+            input_thread.start()
 
         watcher_thread = threading.Thread(target=self._device_watcher, daemon=True)
         watcher_thread.start()

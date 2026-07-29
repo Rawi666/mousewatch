@@ -1,16 +1,51 @@
+import subprocess
 import threading
 import time
+from typing import Any
 
-from mw_platform import IS_WINDOWS, hid
+from mw_platform import IS_LINUX, IS_WINDOWS, hid
 from settings_store import save_settings, set_startup
+
+
+def notify_windows(title: str, message: str, sound: bool = True):
+    """Show a desktop notification on supported platforms."""
+    if IS_WINDOWS:
+        from winotify import Notification, audio
+
+        toast = Notification(
+            app_id="MouseWatch",
+            title=title,
+            msg=message,
+            duration="long",
+        )
+        toast.set_audio(audio.Default if sound else audio.Silent, loop=False)
+        toast.show()
+        return
+
+    if IS_LINUX:
+        try:
+            subprocess.run(["notify-send", title, message], check=False)
+        except FileNotFoundError:
+            print(f"{title}: {message}")
+        return
+
+    print(f"{title}: {message}")
+
+
+def safe_notify(title: str, message: str, sound: bool = True):
+    try:
+        notify_windows(title, message, sound=sound)
+    except Exception:
+        pass
 
 
 class Common:
     """Shared cross-platform app logic used by both tray implementations."""
 
     model: str
-    hid_path: bytes
-    protocol: object
+    hid_path: bytes | None
+    protocol: Any
+    available_protocols: list[Any]
     threshold: int
     interval: int
     reminder_interval: int
@@ -18,6 +53,7 @@ class Common:
     device_notifications: bool
     level: int
     charging: bool
+    device_online: bool
     status_text: str
     _last_notify_time: float
     _notified_full: bool
@@ -111,16 +147,78 @@ class Common:
         return lines
 
     def _status_text(self) -> str:
+        if not getattr(self, "device_online", True):
+            return "MouseWatch - Waiting for device"
         return Common.format_status_text(self.protocol, self.model, self.level, self.charging)
+
+    def _set_disconnected_state(self):
+        self.device_online = False
+        self.status_text = self._status_text()
+        self._update_ui_status()
+
+    def _ordered_device_paths(self, devices: list[dict]) -> list[bytes]:
+        """Keep adapter order and de-duplicate paths for deterministic failover."""
+        paths: list[bytes] = []
+        seen: set[bytes] = set()
+        for dev in devices:
+            path = dev.get("path")
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+        return paths
+
+    def _pick_first_available_path(self, devices: list[dict]) -> bytes | None:
+        paths = self._ordered_device_paths(devices)
+        if not paths:
+            return None
+        return paths[0]
+
+    def _recover_path_and_query(self) -> dict | None:
+        """Try current path first, then scan candidate interfaces and switch on success."""
+        if self.hid_path is not None:
+            resp = Common.query_battery_retry(self.protocol, self.hid_path)
+            if resp is not None:
+                return resp
+
+        devices = self.protocol.discover_devices()
+        for path in self._ordered_device_paths(devices):
+            if path == self.hid_path:
+                continue
+
+            candidate = Common.query_after_throwaway(self.protocol, path, settle_delay=0.05)
+            if candidate is None:
+                continue
+
+            self.hid_path = path
+            return candidate
+
+        # If current protocol has no viable responder, try alternate protocols.
+        for alt_protocol in getattr(self, "available_protocols", []):
+            if alt_protocol is self.protocol:
+                continue
+
+            detected = alt_protocol.autodetect(Common)
+            if detected is None:
+                continue
+
+            model, hid_path, resp = detected
+            self.protocol = alt_protocol
+            self.model = model
+            self.hid_path = hid_path
+            return resp
+
+        return None
 
     def apply_settings(self, settings: dict):
         Common.apply_settings_to_app(self, settings)
 
     def _refresh_status(self) -> str:
-        resp = Common.query_battery_retry(self.protocol, self.hid_path)
+        resp = self._recover_path_and_query()
         if resp is None:
-            return "Failed to read battery status"
+            self._set_disconnected_state()
+            return "No mouse detected. Waiting for device..."
 
+        self.device_online = True
         self.level, self.charging = Common.status_from_response(self.protocol, resp)
         self.status_text = self._status_text()
         self._update_ui_status()
@@ -128,11 +226,13 @@ class Common:
 
     def refresh_debug_snapshot(self) -> dict | None:
         """Force a fresh HID read for the debug dialog and update visible state."""
-        resp = Common.query_battery_retry(self.protocol, self.hid_path)
+        resp = self._recover_path_and_query()
         self._last_debug_refresh_time = time.strftime("%H:%M:%S")
         if resp is None:
+            self._set_disconnected_state()
             return None
 
+        self.device_online = True
         self.level, self.charging = Common.status_from_response(self.protocol, resp)
         self.status_text = self._status_text()
         self._update_ui_status()
@@ -166,11 +266,13 @@ class Common:
             current_paths = {d["path"] for d in current_devices}
 
             if self.hid_path not in current_paths:
-                if current_paths:
-                    self.hid_path = next(iter(current_paths))
+                replacement = self._pick_first_available_path(current_devices)
+                if replacement is not None:
+                    self.hid_path = replacement
                 else:
                     if self._stop_event.wait(5):
                         break
+                    self._set_disconnected_state()
                     continue
 
             try:
@@ -200,6 +302,7 @@ class Common:
                     if parsed is None:
                         continue
 
+                    self.device_online = True
                     battery_level = parsed["battery_level"]
 
                     old_charging = self.charging
@@ -228,14 +331,17 @@ class Common:
     def _device_watcher(self):
         known_paths = {d["path"] for d in self.protocol.discover_devices()}
         while not self._stop_event.wait(5):
-            current_paths = {d["path"] for d in self.protocol.discover_devices()}
+            current_devices = self.protocol.discover_devices()
+            current_paths = {d["path"] for d in current_devices}
             if current_paths != known_paths:
                 added = current_paths - known_paths
                 removed = known_paths - current_paths
                 known_paths = current_paths
 
                 if self.hid_path in removed and current_paths:
-                    self.hid_path = next(iter(current_paths))
+                    replacement = self._pick_first_available_path(current_devices)
+                    if replacement is not None:
+                        self.hid_path = replacement
 
                 self._poll_interrupt.set()
                 if self.device_notifications:
@@ -257,15 +363,19 @@ class Common:
             current_devices = self.protocol.discover_devices()
             current_paths = {d["path"] for d in current_devices}
             if self.hid_path not in current_paths:
-                if current_paths:
-                    self.hid_path = next(iter(current_paths))
+                replacement = self._pick_first_available_path(current_devices)
+                if replacement is not None:
+                    self.hid_path = replacement
                 else:
+                    self._set_disconnected_state()
                     continue
 
-            resp = Common.query_battery_retry(self.protocol, self.hid_path)
+            resp = self._recover_path_and_query()
             if resp is None:
+                self._set_disconnected_state()
                 continue
 
+            self.device_online = True
             self.level, self.charging = Common.status_from_response(self.protocol, resp)
             self.status_text = self._status_text()
             self._update_ui_status()

@@ -42,7 +42,7 @@ if not IS_WINDOWS:
         def refresh(self):
             app = self._tray_app
             snapshot = app.refresh_debug_snapshot()
-            lines = Common.build_debug_lines(app, snapshot)
+            lines = Common.build_debug_lines(app, snapshot, section_title=app.protocol.input_section_title)
             self._text.setPlainText("\n".join(lines))
 else:
     class QtDebugDialog:

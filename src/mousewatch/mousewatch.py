@@ -6,9 +6,7 @@ import sys
 import time
 
 from common import Common
-from hid_protocol import (
-    safe_notify,
-)
+from common import safe_notify
 from mw_platform import IS_LINUX, IS_WINDOWS
 from protocols import (
     autodetect_any,
@@ -60,6 +58,44 @@ def run_cli(protocol, model, hid_path, args):
             break
 
 
+def run_probe(protocol):
+    print(f"MouseWatch Probe - {protocol.display_name}")
+    print("=" * 40)
+
+    devices = protocol.discover_devices()
+    if not devices:
+        print("No candidate HID devices found.")
+        return 1
+
+    for index, dev in enumerate(devices, 1):
+        path = dev.get("path")
+        product = dev.get("product_string") or "?"
+        pid = dev.get("product_id", 0)
+        usage_page = dev.get("usage_page", 0)
+        usage = dev.get("usage", 0)
+        iface = dev.get("interface_number", "?")
+        print(f"\n[{index}] product={product}")
+        print(f"    pid=0x{int(pid):04X} usage_page=0x{int(usage_page):04X} usage=0x{int(usage):04X} iface={iface}")
+
+        if path is None:
+            print("    path=<missing>")
+            continue
+
+        resp = Common.query_after_throwaway(protocol, path, settle_delay=0.05)
+        if resp is None:
+            print("    query: no response")
+            continue
+
+        level, charging = Common.status_from_response(protocol, resp)
+        print(f"    query: battery={level}% charging={charging}")
+
+        raw_frame = resp.get("raw_frame")
+        if isinstance(raw_frame, list):
+            print("    frame:", " ".join(f"{b:02X}" for b in raw_frame))
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MouseWatch - Battery monitor for wireless mice"
@@ -106,6 +142,11 @@ def main():
         action="store_true",
         help="Running from autostart (GUI waits for tray availability)",
     )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Probe matching HID interfaces for the selected protocol and exit",
+    )
     args = parser.parse_args()
     stdin_is_interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
 
@@ -141,7 +182,22 @@ def main():
         print(f"Unknown protocol '{args.protocol}'. Use one of: auto, {', '.join(get_protocol_keys())}")
         sys.exit(1)
 
-    protocols = get_protocol_order(selected_protocol_key)
+    if selected_protocol is not None:
+        protocols = [selected_protocol]
+    else:
+        protocols = get_protocol_order(None)
+
+    if args.probe:
+        if selected_protocol is not None:
+            sys.exit(run_probe(selected_protocol))
+
+        exit_code = 0
+        for probe_protocol in protocols:
+            code = run_probe(probe_protocol)
+            if code != 0:
+                exit_code = code
+            print()
+        sys.exit(exit_code)
 
     if model is not None:
         matching_protocols = [p for p in protocols if p.is_known_model(model)]
@@ -183,7 +239,7 @@ def main():
                 model, hid_path, resp = result
                 print(f"  Detected: {protocol.format_model_name(model)}")
                 print(f"  Battery:  {resp['battery_level']}%")
-                charging = resp["charge_status"] != 0 or resp["connect_mode"] == 0
+                _level, charging = Common.status_from_response(protocol, resp)
                 print(f"  Status:   {'Charging' if charging else 'Wireless'}")
                 if stdin_is_interactive and not args.once:
                     print()
@@ -220,15 +276,21 @@ def main():
                         "battery_level": 0,
                         "charge_status": 1,
                         "connect_mode": 0,
+                        "device_online": True,
                     }
                 else:
-                    msg = (f"No {protocol.display_name} mouse detected. Make sure it's connected "
-                           "via the 2.4GHz dongle.")
-                    safe_notify("MouseWatch", msg)
-                    sys.exit(1)
+                    if model is None:
+                        model = "Unknown"
+                    hid_path = None
+                    resp = {
+                        "battery_level": 0,
+                        "charge_status": 0,
+                        "connect_mode": 1,
+                        "device_online": False,
+                    }
 
     # ── Find HID path if not yet resolved ──
-    if hid_path is None:
+    if hid_path is None and args.nogui:
         devices = protocol.discover_devices()
         for dev in devices:
             resp = Common.query_after_throwaway(protocol, dev["path"])
@@ -245,7 +307,11 @@ def main():
             sys.exit(1)
 
     # Get fresh reading for initial state (needed when HID path was found via manual pick)
-    if resp is None:
+    if resp is None and args.nogui:
+        if hid_path is None:
+            msg = "Failed to read battery status."
+            print(msg)
+            sys.exit(1)
         resp = Common.query_after_throwaway(protocol, hid_path)
         if resp is None:
             resp = Common.query_battery_retry(protocol, hid_path)
@@ -264,9 +330,17 @@ def main():
         run_cli(protocol, model, hid_path, args)
     else:
         if IS_WINDOWS:
-            app = TrayApp(protocol, model, hid_path, resp, settings)
+            app = TrayApp(protocol, model, hid_path, resp, settings, available_protocols=protocols)
         else:
-            app = QtTrayApp(protocol, model, hid_path, resp, settings, is_autostart=args.autostart)
+            app = QtTrayApp(
+                protocol,
+                model,
+                hid_path,
+                resp,
+                settings,
+                is_autostart=args.autostart,
+                available_protocols=protocols,
+            )
         app.run()
 
 

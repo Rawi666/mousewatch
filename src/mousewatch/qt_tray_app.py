@@ -4,7 +4,7 @@ import threading
 import time
 
 from common import Common
-from icon_factory import create_qt_battery_icon
+from icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
 from mw_platform import (
     IS_WINDOWS,
     QAction,
@@ -25,10 +25,11 @@ if not IS_WINDOWS:
         status_changed = Signal(int, bool, str)
         notification_requested = Signal(str, str)
 
-        def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
-                     settings: dict, is_autostart: bool = False):
+        def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
+                     settings: dict, is_autostart: bool = False, available_protocols: list | None = None):
             super().__init__()
             self.protocol = protocol
+            self.available_protocols = available_protocols or [protocol]
             self.model = model
             self.hid_path = hid_path
             self.is_autostart = is_autostart
@@ -40,7 +41,13 @@ if not IS_WINDOWS:
             self.notified_at = None
             self._last_notify_time = 0
             self._notified_full = False
-            self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
+            if initial_resp is None:
+                self.level = 0
+                self.charging = False
+                self.device_online = False
+            else:
+                self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
+                self.device_online = bool(initial_resp.get("device_online", True))
             self.status_text = self._status_text()
             self._stop_event = threading.Event()
             self._poll_interrupt = threading.Event()
@@ -88,7 +95,10 @@ if not IS_WINDOWS:
             self.level = level
             self.charging = charging
             self.status_text = status_text
-            self.tray.setIcon(create_qt_battery_icon(self.level, self.threshold))
+            if self.device_online:
+                self.tray.setIcon(create_qt_battery_icon(self.level, self.threshold))
+            else:
+                self.tray.setIcon(create_qt_unknown_battery_icon())
             self.tray.setToolTip(self.status_text)
             self.tray.setVisible(True)
 
@@ -157,8 +167,9 @@ if not IS_WINDOWS:
             poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
             poll_thread.start()
 
-            input_thread = threading.Thread(target=self._input_listener, daemon=True)
-            input_thread.start()
+            if self.protocol.supports_input_listener:
+                input_thread = threading.Thread(target=self._input_listener, daemon=True)
+                input_thread.start()
 
             watcher_thread = threading.Thread(target=self._device_watcher, daemon=True)
             watcher_thread.start()
@@ -166,9 +177,9 @@ if not IS_WINDOWS:
             self._app.exec()
 else:
     class QtTrayApp:
-        def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
-                     settings: dict, is_autostart: bool = False):
-            _ = (protocol, model, hid_path, initial_resp, settings, is_autostart)
+        def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
+                     settings: dict, is_autostart: bool = False, available_protocols: list | None = None):
+            _ = (protocol, model, hid_path, initial_resp, settings, is_autostart, available_protocols)
 
         def run(self):
             raise RuntimeError("QtTrayApp is only available on Linux")
