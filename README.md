@@ -26,7 +26,7 @@ A9 Plus
 
 ```
 pip install -r requirements.txt
-python mousewatch.py
+python src/mousewatch/mousewatch.py
 ```
 
 Linux helper scripts:
