@@ -11,8 +11,9 @@ from hid_protocol import safe_notify
 class TrayApp(Common):
     """System tray application for MouseWatch."""
 
-    def __init__(self, model: str, hid_path: bytes, initial_resp: dict,
+    def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
                  settings: dict):
+        self.protocol = protocol
         self.model = model
         self.hid_path = hid_path
         self.threshold = settings["threshold"]
@@ -23,14 +24,14 @@ class TrayApp(Common):
         self.notified_at = None
         self._last_notify_time = 0
         self._notified_full = False
-        self.level, self.charging = Common.status_from_response(initial_resp)
+        self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
         self.status_text = self._status_text()
         self._stop_event = threading.Event()
         self._poll_interrupt = threading.Event()
         self.icon = None
-        self._last_e2_raw = None
-        self._last_e2_decoded = None
-        self._last_e2_time = None
+        self._last_input_raw = None
+        self._last_input_decoded = None
+        self._last_input_time = None
         self._menu_supported = True
         self._fallback_ui_started = False
         self._last_debug_refresh_time = None

@@ -25,9 +25,10 @@ if not IS_WINDOWS:
         status_changed = Signal(int, bool, str)
         notification_requested = Signal(str, str)
 
-        def __init__(self, model: str, hid_path: bytes, initial_resp: dict,
+        def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
                      settings: dict, is_autostart: bool = False):
             super().__init__()
+            self.protocol = protocol
             self.model = model
             self.hid_path = hid_path
             self.is_autostart = is_autostart
@@ -39,13 +40,13 @@ if not IS_WINDOWS:
             self.notified_at = None
             self._last_notify_time = 0
             self._notified_full = False
-            self.level, self.charging = Common.status_from_response(initial_resp)
+            self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
             self.status_text = self._status_text()
             self._stop_event = threading.Event()
             self._poll_interrupt = threading.Event()
-            self._last_e2_raw = None
-            self._last_e2_decoded = None
-            self._last_e2_time = None
+            self._last_input_raw = None
+            self._last_input_decoded = None
+            self._last_input_time = None
             self._last_debug_refresh_time = None
             self._settings_dialog = None
             self._debug_dialog = None
@@ -165,9 +166,9 @@ if not IS_WINDOWS:
             self._app.exec()
 else:
     class QtTrayApp:
-        def __init__(self, model: str, hid_path: bytes, initial_resp: dict,
+        def __init__(self, protocol, model: str, hid_path: bytes, initial_resp: dict,
                      settings: dict, is_autostart: bool = False):
-            _ = (model, hid_path, initial_resp, settings, is_autostart)
+            _ = (protocol, model, hid_path, initial_resp, settings, is_autostart)
 
         def run(self):
             raise RuntimeError("QtTrayApp is only available on Linux")

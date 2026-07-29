@@ -7,23 +7,23 @@ import time
 
 from common import Common
 from hid_protocol import (
-    MOUSE_DB,
-    autodetect,
-    find_mchose_devices,
-    find_wired_mchose,
-    pick_model,
-    query_battery,
     safe_notify,
 )
 from mw_platform import IS_LINUX, IS_WINDOWS
+from protocols import (
+    autodetect_any,
+    get_protocol_by_key,
+    get_protocol_keys,
+    get_protocol_order,
+)
 from qt_tray_app import QtTrayApp
 from settings_store import load_settings
 from tray_app import TrayApp
 
 
-def run_cli(model, hid_path, args):
+def run_cli(protocol, model, hid_path, args):
     """Original CLI poll loop."""
-    print(f"\nMonitoring MCHOSE {model}")
+    print(f"\nMonitoring {protocol.format_model_name(model)}")
     print(f"  Threshold:  {args.threshold}%")
     print(f"  Interval:   {args.interval}s")
     if args.once:
@@ -33,18 +33,18 @@ def run_cli(model, hid_path, args):
     notified_at = None
 
     while True:
-        resp = query_battery(hid_path)
+        resp = protocol.query_battery(hid_path)
         if resp is None:
             print(f"[{time.strftime('%H:%M:%S')}] Failed to read battery "
                   "(mouse asleep or disconnected)")
         else:
-            level, charging = Common.status_from_response(resp)
+            level, charging = Common.status_from_response(protocol, resp)
             status = "Charging" if charging else "Wireless"
             print(f"[{time.strftime('%H:%M:%S')}] Battery: {level}%  ({status})")
 
             if level <= args.threshold and not charging and notified_at != level:
                 notified_at = level
-                msg = f"MCHOSE {model} battery is at {level}%"
+                msg = f"{protocol.format_model_name(model)} battery is at {level}%"
                 print(f"  >> LOW BATTERY ALERT: {msg}")
                 safe_notify("MouseWatch - Low Battery", msg)
             elif level > args.threshold:
@@ -62,7 +62,7 @@ def run_cli(model, hid_path, args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MouseWatch - Battery monitor for MCHOSE wireless mice"
+        description="MouseWatch - Battery monitor for wireless mice"
     )
     parser.add_argument(
         "-t", "--threshold",
@@ -81,6 +81,15 @@ def main():
         type=str,
         default=None,
         help="Mouse model name (skip auto-detection)",
+    )
+    parser.add_argument(
+        "-p", "--protocol",
+        type=str,
+        default="auto",
+        help=(
+            "Mouse protocol to use "
+            f"(auto|{'|'.join(get_protocol_keys())})"
+        ),
     )
     parser.add_argument(
         "--once",
@@ -124,24 +133,55 @@ def main():
     hid_path = None
     resp = None
     model = args.model
+    protocol = None
 
-    if model and model not in MOUSE_DB:
-        print(f"Unknown model '{model}'. Use one of:")
-        for name in sorted(MOUSE_DB.keys()):
-            print(f"  {name}")
+    selected_protocol_key = None if args.protocol == "auto" else args.protocol.strip().lower()
+    selected_protocol = None if selected_protocol_key is None else get_protocol_by_key(selected_protocol_key)
+    if selected_protocol_key is not None and selected_protocol is None:
+        print(f"Unknown protocol '{args.protocol}'. Use one of: auto, {', '.join(get_protocol_keys())}")
         sys.exit(1)
+
+    protocols = get_protocol_order(selected_protocol_key)
+
+    if model is not None:
+        matching_protocols = [p for p in protocols if p.is_known_model(model)]
+        if not matching_protocols:
+            print(f"Unknown model '{model}'.")
+            if selected_protocol_key is None:
+                print("Try one of the known models for your preferred protocol.")
+            else:
+                assert selected_protocol is not None
+                known = selected_protocol.list_models()
+                print(f"Known models for {selected_protocol_key}:")
+                for name in known:
+                    print(f"  {name}")
+            sys.exit(1)
+        protocol = matching_protocols[0]
+
+    detected = autodetect_any(Common, protocols)
+    if detected is not None:
+        detected_protocol, detected_model, detected_path, detected_resp = detected
+        if protocol is None:
+            protocol = detected_protocol
+        if model is None:
+            model = detected_model
+        hid_path = detected_path
+        resp = detected_resp
+
+    if protocol is None:
+        protocol = protocols[0]
 
     if args.nogui:
         # CLI mode: interactive detection with prompts
-        print("MouseWatch - MCHOSE Battery Monitor")
+        print("MouseWatch - Battery Monitor")
         print("=" * 40)
 
-        if model is None:
-            print("\nSearching for MCHOSE mouse...")
-            result = autodetect(Common)
+        if model is None or hid_path is None or resp is None:
+            print(f"\nSearching for {protocol.display_name} mouse...")
+            result = protocol.autodetect(Common)
             if result:
                 model, hid_path, resp = result
-                print(f"  Detected: MCHOSE {model}")
+                print(f"  Detected: {protocol.format_model_name(model)}")
                 print(f"  Battery:  {resp['battery_level']}%")
                 charging = resp["charge_status"] != 0 or resp["connect_mode"] == 0
                 print(f"  Status:   {'Charging' if charging else 'Wireless'}")
@@ -149,10 +189,11 @@ def main():
                     print()
                     confirm = input("Is this correct? [Y/n] ").strip().lower()
                     if confirm and confirm != "y":
-                        model = pick_model()
+                        model = protocol.pick_model()
                         hid_path = None
+                        resp = None
             else:
-                print("  No MCHOSE mouse detected automatically.")
+                print(f"  No {protocol.display_name} mouse detected automatically.")
                 if args.once:
                     print("  Hint: if you see 'HID error: open failed', fix Linux hidraw permissions first.")
                     sys.exit(1)
@@ -160,19 +201,19 @@ def main():
                     print("  Cannot prompt for model selection in a non-interactive session.")
                     print("  Re-run interactively or pass --model to force a specific mouse model.")
                     sys.exit(1)
-                model = pick_model()
+                model = protocol.pick_model()
     else:
         # GUI mode: silent auto-detection
-        if model is None:
-            result = autodetect(Common)
+        if model is None or hid_path is None or resp is None:
+            result = protocol.autodetect(Common)
             if result:
                 model, hid_path, resp = result
             else:
-                wired = find_wired_mchose()
+                wired = protocol.find_wired_device()
                 if wired:
                     # Start in wired mode — no battery data yet,
                     # input listener will pick up E2 reports.
-                    name = wired["name"].replace("MCHOSE ", "")
+                    name = (wired["name"] or "").replace(f"{protocol.display_name} ", "")
                     model = name or "Unknown"
                     hid_path = wired["path"]
                     resp = {
@@ -181,21 +222,21 @@ def main():
                         "connect_mode": 0,
                     }
                 else:
-                    msg = ("No MCHOSE mouse detected. Make sure it's connected "
+                    msg = (f"No {protocol.display_name} mouse detected. Make sure it's connected "
                            "via the 2.4GHz dongle.")
                     safe_notify("MouseWatch", msg)
                     sys.exit(1)
 
     # ── Find HID path if not yet resolved ──
     if hid_path is None:
-        devices = find_mchose_devices()
+        devices = protocol.discover_devices()
         for dev in devices:
-            resp = Common.query_after_throwaway(dev["path"])
+            resp = Common.query_after_throwaway(protocol, dev["path"])
             if resp:
                 hid_path = dev["path"]
                 break
         if hid_path is None:
-            msg = (f"Could not find HID device for MCHOSE {model}. "
+            msg = (f"Could not find HID device for {protocol.format_model_name(model)}. "
                    "Make sure the mouse is connected via the 2.4GHz dongle.")
             if args.nogui:
                 print(f"\n{msg}")
@@ -205,9 +246,9 @@ def main():
 
     # Get fresh reading for initial state (needed when HID path was found via manual pick)
     if resp is None:
-        resp = Common.query_after_throwaway(hid_path)
+        resp = Common.query_after_throwaway(protocol, hid_path)
         if resp is None:
-            resp = Common.query_battery_retry(hid_path)
+            resp = Common.query_battery_retry(protocol, hid_path)
         if resp is None:
             msg = "Failed to read battery status."
             if args.nogui:
@@ -220,12 +261,12 @@ def main():
         # CLI mode uses threshold/interval from settings
         args.threshold = settings["threshold"]
         args.interval = settings["poll_interval"]
-        run_cli(model, hid_path, args)
+        run_cli(protocol, model, hid_path, args)
     else:
         if IS_WINDOWS:
-            app = TrayApp(model, hid_path, resp, settings)
+            app = TrayApp(protocol, model, hid_path, resp, settings)
         else:
-            app = QtTrayApp(model, hid_path, resp, settings, is_autostart=args.autostart)
+            app = QtTrayApp(protocol, model, hid_path, resp, settings, is_autostart=args.autostart)
         app.run()
 
 
