@@ -123,6 +123,11 @@ def query_battery(path: bytes) -> dict | None:
         battery_level = decoded[9]
         charge_status = decoded[10]
 
+        # If this is not a valid MCHOSE status frame (for example, path switched
+        # to another vendor), reject it so runtime failover can try other protocols.
+        if battery_level > 100:
+            return None
+
         return {
             "vid": vid,
             "pid": pid,

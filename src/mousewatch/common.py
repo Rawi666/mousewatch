@@ -173,10 +173,10 @@ class Common:
             return None
         return paths[0]
 
-    def _recover_path_and_query(self) -> dict | None:
+    def _recover_path_and_query(self, retries: int = 5, delay: float = 2.0) -> dict | None:
         """Try current path first, then scan candidate interfaces and switch on success."""
         if self.hid_path is not None:
-            resp = Common.query_battery_retry(self.protocol, self.hid_path)
+            resp = Common.query_battery_retry(self.protocol, self.hid_path, retries=retries, delay=delay)
             if resp is not None:
                 return resp
 
@@ -205,6 +205,9 @@ class Common:
             self.protocol = alt_protocol
             self.model = model
             self.hid_path = hid_path
+            self._last_input_raw = None
+            self._last_input_decoded = None
+            self._last_input_time = None
             return resp
 
         return None
@@ -213,7 +216,8 @@ class Common:
         Common.apply_settings_to_app(self, settings)
 
     def _refresh_status(self) -> str:
-        resp = self._recover_path_and_query()
+        # Manual refresh should feel responsive; polling still uses longer retries.
+        resp = self._recover_path_and_query(retries=1, delay=0.2)
         if resp is None:
             self._set_disconnected_state()
             return "No mouse detected. Waiting for device..."
@@ -262,6 +266,13 @@ class Common:
 
     def _input_listener(self):
         while not self._stop_event.is_set():
+            # Stay alive across protocol switches. For protocols that do not use
+            # persistent input reports, idle and re-check later.
+            if not getattr(self.protocol, "supports_input_listener", False):
+                if self._stop_event.wait(2):
+                    break
+                continue
+
             current_devices = self.protocol.discover_devices()
             current_paths = {d["path"] for d in current_devices}
 

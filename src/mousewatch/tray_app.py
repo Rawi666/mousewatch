@@ -42,6 +42,8 @@ class TrayApp(Common):
         self._menu_supported = True
         self._fallback_ui_started = False
         self._last_debug_refresh_time = None
+        self._status_refresh_active = False
+        self._status_refresh_lock = threading.Lock()
 
     def _create_menu(self):
         import pystray
@@ -69,8 +71,20 @@ class TrayApp(Common):
     def _on_status(self, icon, item):
         _ = icon
         _ = item
-        msg = self._refresh_status()
-        self._notify("MouseWatch", msg)
+        with self._status_refresh_lock:
+            if self._status_refresh_active:
+                return
+            self._status_refresh_active = True
+
+        def _refresh_worker():
+            try:
+                msg = self._refresh_status()
+                self._notify("MouseWatch", msg)
+            finally:
+                with self._status_refresh_lock:
+                    self._status_refresh_active = False
+
+        threading.Thread(target=_refresh_worker, daemon=True).start()
 
     def _on_settings(self, icon, item):
         _ = icon
@@ -168,9 +182,8 @@ class TrayApp(Common):
         poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         poll_thread.start()
 
-        if self.protocol.supports_input_listener:
-            input_thread = threading.Thread(target=self._input_listener, daemon=True)
-            input_thread.start()
+        input_thread = threading.Thread(target=self._input_listener, daemon=True)
+        input_thread.start()
 
         watcher_thread = threading.Thread(target=self._device_watcher, daemon=True)
         watcher_thread.start()
