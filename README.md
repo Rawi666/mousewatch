@@ -52,6 +52,12 @@ run.bat
 
 `run.bat` and `run.ps1` automatically create the venv first if it does not exist.
 
+For Windows build tooling (PyInstaller), install dev dependencies:
+
+```bat
+venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
 Optional custom venv path:
 
 ```bash
@@ -90,6 +96,28 @@ Protocol options:
 - `--protocol atk`: force ATK protocol
 
 Probe mode (`--probe`) prints candidate HID interfaces, query results, and decoded protocol frames to help with protocol debugging.
+
+## Running tests
+
+Install runtime + development dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run tests:
+
+```bash
+pytest
+```
+
+If you use the project venv directly:
+
+```bash
+./create_venv.sh
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m pytest -q
+```
 
 ## Settings
 
@@ -144,6 +172,8 @@ Then replug the dongle and run the app normally.
 install.bat
 ```
 This builds a standalone `MouseWatch.exe` and adds it to Windows startup. Run `uninstall.bat` to remove.
+
+`build.bat` installs development/build dependencies from `requirements-dev.txt` before running `python -m PyInstaller`.
 
 **Linux:** Use the **Start on login** toggle in Settings. This creates an XDG autostart entry at `~/.config/autostart/mousewatch.desktop`.
 

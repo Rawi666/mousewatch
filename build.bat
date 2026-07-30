@@ -17,10 +17,10 @@ if errorlevel 1 (
 
 set "VENV_PY=%VENV_PATH%\Scripts\python.exe"
 
-echo Installing build dependency (PyInstaller) in venv...
-"%VENV_PY%" -m pip install pyinstaller
+echo Installing development/build dependencies from requirements-dev.txt...
+"%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-dev.txt"
 if errorlevel 1 (
-    echo ERROR: Failed to install PyInstaller in venv.
+    echo ERROR: Failed to install development/build dependencies.
     goto :fail
 )
 
