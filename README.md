@@ -22,6 +22,8 @@ M7, M7 Pro, M7 Ultra, L7, L7 Pro, L7 Pro+, L7 Ultra, L7 Ultra+, A7, A7 Pro, A7 U
 
 A9 Plus
 
+Protocol/reference implementation used: [libatk-rs](https://github.com/cyberphantom52/libatk-rs/)
+
 ## Quick start
 
 ```
@@ -202,4 +204,4 @@ Communicates with the mouse via HID through the 2.4GHz USB dongle. Uses two chan
 - **Feature reports** (`0x11 0x06`) — periodic polling for battery level and status
 - **Input reports** (`0xE2`) — real-time push notifications for charge state changes
 
-MCHOSE protocol was reverse-engineered from the MCHOSE web configurator. ATK support is implemented with command/response framing derived from the `libatk-rs` protocol notes.
+MCHOSE protocol was reverse-engineered from the MCHOSE web configurator. ATK support is implemented with command/response framing derived from [libatk-rs](https://github.com/cyberphantom52/libatk-rs/) protocol notes.
