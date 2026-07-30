@@ -4,7 +4,10 @@ import shutil
 import subprocess
 import sys
 
-from mw_platform import IS_WINDOWS
+try:
+    from .mw_platform import IS_WINDOWS
+except ImportError:
+    from mw_platform import IS_WINDOWS
 
 DEFAULTS = {
     "threshold": 20,
@@ -14,6 +17,41 @@ DEFAULTS = {
     "device_notifications": True,
     "start_with_windows": False,
 }
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _coerce_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def sanitize_settings(settings: dict | None) -> dict:
+    """Normalize persisted settings into safe, clamped runtime values."""
+    src = settings if isinstance(settings, dict) else {}
+    return {
+        "threshold": _coerce_int(src.get("threshold"), DEFAULTS["threshold"], 1, 100),
+        "reminder_interval": _coerce_int(src.get("reminder_interval"), DEFAULTS["reminder_interval"], 60, 3600),
+        "poll_interval": _coerce_int(src.get("poll_interval"), DEFAULTS["poll_interval"], 20, 3600),
+        "notification_sound": _coerce_bool(src.get("notification_sound"), DEFAULTS["notification_sound"]),
+        "device_notifications": _coerce_bool(src.get("device_notifications"), DEFAULTS["device_notifications"]),
+        "start_with_windows": _coerce_bool(src.get("start_with_windows"), DEFAULTS["start_with_windows"]),
+    }
 
 
 def _xdg_base(env_name: str, fallback_parts: tuple[str, ...]) -> str:
@@ -37,23 +75,25 @@ def _config_path() -> str:
 
 def load_settings() -> dict:
     """Load settings from JSON config file, falling back to defaults."""
-    settings = dict(DEFAULTS)
     try:
         with open(_config_path(), "r") as f:
             saved = json.load(f)
-        for key in DEFAULTS:
-            if key in saved:
-                settings[key] = saved[key]
     except (json.JSONDecodeError, OSError):
-        pass
-    return settings
+        saved = {}
+    return sanitize_settings(saved)
 
 
 def save_settings(settings: dict):
     """Save settings to JSON config file."""
+    normalized = sanitize_settings(settings)
     os.makedirs(_config_dir(), exist_ok=True)
     with open(_config_path(), "w") as f:
-        json.dump(settings, f, indent=2)
+        json.dump(normalized, f, indent=2)
+
+
+def _ps_quote(value: str) -> str:
+    # Escape single quotes for PowerShell single-quoted literals.
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _startup_shortcut_path() -> str:
@@ -98,9 +138,9 @@ def set_startup(enabled: bool):
 
         ps_script = (
             f"$ws = New-Object -ComObject WScript.Shell; "
-            f"$sc = $ws.CreateShortcut('{lnk_path}'); "
-            f"$sc.TargetPath = '{target}'; "
-            f"$sc.Arguments = '{arguments}'; "
+            f"$sc = $ws.CreateShortcut({_ps_quote(lnk_path)}); "
+            f"$sc.TargetPath = {_ps_quote(target)}; "
+            f"$sc.Arguments = {_ps_quote(arguments)}; "
             f"$sc.Save()"
         )
         subprocess.run(

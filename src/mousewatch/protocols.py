@@ -3,22 +3,40 @@ from __future__ import annotations
 import time
 from typing import Iterable, Protocol
 
-from device_ids import (
-    ATK_PRODUCT_ID_WIRED_MOUSE,
-    ATK_PRODUCT_ID_WIRELESS_DONGLE,
-    ATK_PRODUCT_IDS,
-    ATK_VENDOR_ID,
-)
-from mchose_protocol import (
-    MOUSE_DB,
-    find_mchose_devices,
-    find_wired_mchose,
-    pick_model,
-    query_battery,
-    resolve_model_from_response,
-    xor_decode,
-)
-from mw_platform import hid
+try:
+    from .device_ids import (
+        ATK_PRODUCT_ID_WIRED_MOUSE,
+        ATK_PRODUCT_ID_WIRELESS_DONGLE,
+        ATK_PRODUCT_IDS,
+        ATK_VENDOR_ID,
+    )
+    from .mchose_protocol import (
+        MOUSE_DB,
+        find_mchose_devices,
+        find_wired_mchose,
+        pick_model,
+        query_battery,
+        resolve_model_from_response,
+        xor_decode,
+    )
+    from .mw_platform import hid
+except ImportError:
+    from device_ids import (
+        ATK_PRODUCT_ID_WIRED_MOUSE,
+        ATK_PRODUCT_ID_WIRELESS_DONGLE,
+        ATK_PRODUCT_IDS,
+        ATK_VENDOR_ID,
+    )
+    from mchose_protocol import (
+        MOUSE_DB,
+        find_mchose_devices,
+        find_wired_mchose,
+        pick_model,
+        query_battery,
+        resolve_model_from_response,
+        xor_decode,
+    )
+    from mw_platform import hid
 
 
 class MouseProtocolAdapter(Protocol):
@@ -289,6 +307,17 @@ class AtkProtocolAdapter:
         frame[15] = (0x55 - checksum_base) & 0xFF
         return frame
 
+    def _frame_checksum(self, frame: list[int]) -> int:
+        checksum_base = (
+            ATK_REPORT_ID
+            + frame[0]
+            + frame[1]
+            + ((frame[2] << 8) | frame[3])
+            + frame[4]
+            + sum(frame[5:15])
+        ) & 0xFF
+        return (0x55 - checksum_base) & 0xFF
+
     def _extract_frame(self, raw: list[int]) -> list[int] | None:
         if len(raw) >= ATK_CMD_LEN + 1 and raw[0] == ATK_REPORT_ID:
             return raw[1:1 + ATK_CMD_LEN]
@@ -298,6 +327,9 @@ class AtkProtocolAdapter:
 
     def _parse_battery_frame(self, frame: list[int]) -> dict | None:
         if len(frame) != ATK_CMD_LEN:
+            return None
+
+        if frame[15] != self._frame_checksum(frame):
             return None
 
         command_id = frame[0]
@@ -311,10 +343,12 @@ class AtkProtocolAdapter:
             return None
         if data_len > len(data):
             return None
+        if data_len < 2:
+            return None
 
         battery_level = data[0]
         charge_status = data[1]
-        voltage_raw = data[2]
+        voltage_raw = data[2] if data_len >= 3 else 0
 
         if battery_level > 100:
             return None
@@ -346,14 +380,17 @@ class AtkProtocolAdapter:
                 return None
 
             return self._parse_battery_frame(frame)
-        except Exception:
+        except (OSError, ValueError):
+            return None
+        except Exception as exc:
+            print(f"ATK query error: {exc}")
             return None
         finally:
             if dev is not None:
                 try:
                     dev.close()
-                except Exception:
-                    pass
+                except OSError:
+                    print("Warning: failed to close ATK HID handle")
 
     def status_from_response(self, resp: dict) -> tuple[int, bool]:
         level = _safe_int(resp.get("battery_level"))

@@ -1,6 +1,9 @@
 from io import BytesIO
 
-from mw_platform import IS_WINDOWS
+try:
+    from .mw_platform import IS_WINDOWS
+except ImportError:
+    from mw_platform import IS_WINDOWS
 
 
 FONT_ARIAL = "arial.ttf"
@@ -114,14 +117,18 @@ def create_qt_battery_icon(level: int, threshold: int):
         raise RuntimeError("Qt icon generation is not supported on Windows")
 
     from PIL import Image as PILImage
-    from mw_platform import QApplication, QIcon, QImage, QPixmap
+    try:
+        from .mw_platform import QApplication, QIcon, QImage, QPixmap
+    except ImportError:
+        from mw_platform import QApplication, QIcon, QImage, QPixmap
 
     app = QApplication.instance() or QApplication([])
     _ = app
 
     icon = QIcon()
+    base_image = create_battery_icon(level, threshold)
     for size in (16, 22, 24, 32, 48, 64):
-        image = create_battery_icon(level, threshold).resize((size, size), PILImage.Resampling.LANCZOS)
+        image = base_image.resize((size, size), PILImage.Resampling.LANCZOS)
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         qimage = QImage.fromData(buffer.getvalue(), "PNG")
@@ -135,14 +142,18 @@ def create_qt_unknown_battery_icon():
         raise RuntimeError("Qt icon generation is not supported on Windows")
 
     from PIL import Image as PILImage
-    from mw_platform import QApplication, QIcon, QImage, QPixmap
+    try:
+        from .mw_platform import QApplication, QIcon, QImage, QPixmap
+    except ImportError:
+        from mw_platform import QApplication, QIcon, QImage, QPixmap
 
     app = QApplication.instance() or QApplication([])
     _ = app
 
     icon = QIcon()
+    base_image = create_unknown_battery_icon()
     for size in (16, 22, 24, 32, 48, 64):
-        image = create_unknown_battery_icon().resize((size, size), PILImage.Resampling.LANCZOS)
+        image = base_image.resize((size, size), PILImage.Resampling.LANCZOS)
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         qimage = QImage.fromData(buffer.getvalue(), "PNG")

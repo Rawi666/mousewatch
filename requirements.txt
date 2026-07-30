@@ -1,5 +1,5 @@
-hidapi
-PySide6; sys_platform != "win32"
-winotify; sys_platform == "win32"
-pystray; sys_platform == "win32"
-Pillow
+hidapi>=0.14.0,<0.15.0
+PySide6>=6.7.0,<6.8.0; sys_platform != "win32"
+winotify>=1.1.0,<2.0.0; sys_platform == "win32"
+pystray>=0.19.5,<0.20.0; sys_platform == "win32"
+Pillow>=10.4.0,<11.0.0

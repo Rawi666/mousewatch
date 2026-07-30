@@ -1,5 +1,9 @@
-from common import Common
-from settings_store import startup_shortcut_exists
+try:
+    from .common import Common
+    from .settings_store import startup_shortcut_exists
+except ImportError:
+    from common import Common
+    from settings_store import startup_shortcut_exists
 
 
 class SettingsWindow:
@@ -7,27 +11,30 @@ class SettingsWindow:
 
     _instance = None
 
-    def __init__(self, tray_app):
-        if SettingsWindow._instance is not None:
+    @classmethod
+    def open(cls, tray_app, root):
+        if cls._instance is not None:
             try:
-                SettingsWindow._instance._root.lift()
-                SettingsWindow._instance._root.focus_force()
-                return
+                cls._instance._window.lift()
+                cls._instance._window.focus_force()
+                return cls._instance
             except Exception:
-                SettingsWindow._instance = None
+                cls._instance = None
+        return cls(tray_app, root)
 
+    def __init__(self, tray_app, root):
         SettingsWindow._instance = self
         self._tray_app = tray_app
 
         import tkinter as tk
         from tkinter import ttk
 
-        self._root = tk.Tk()
-        self._root.title("MouseWatch Settings")
-        self._root.resizable(False, False)
-        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._window = tk.Toplevel(root)
+        self._window.title("MouseWatch Settings")
+        self._window.resizable(False, False)
+        self._window.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        frame = ttk.Frame(self._root, padding=16)
+        frame = ttk.Frame(self._window, padding=16)
         frame.grid(sticky="nsew")
 
         row = 0
@@ -79,7 +86,8 @@ class SettingsWindow:
         ttk.Button(btn_frame, text="Cancel", command=self._on_close).pack(
             side="left", padx=4)
 
-        self._root.mainloop()
+        self._window.lift()
+        self._window.focus_force()
 
     def _on_save(self):
         settings = {
@@ -95,4 +103,4 @@ class SettingsWindow:
 
     def _on_close(self):
         SettingsWindow._instance = None
-        self._root.destroy()
+        self._window.destroy()

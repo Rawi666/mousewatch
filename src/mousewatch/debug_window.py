@@ -1,4 +1,7 @@
-from common import Common
+try:
+    from .common import Common
+except ImportError:
+    from common import Common
 
 
 class DebugWindow:
@@ -6,28 +9,31 @@ class DebugWindow:
 
     _instance = None
 
-    def __init__(self, tray_app):
-        if DebugWindow._instance is not None:
+    @classmethod
+    def open(cls, tray_app, root):
+        if cls._instance is not None:
             try:
-                DebugWindow._instance._root.lift()
-                DebugWindow._instance._root.focus_force()
-                DebugWindow._instance._refresh()
-                return
+                cls._instance._window.lift()
+                cls._instance._window.focus_force()
+                cls._instance._refresh()
+                return cls._instance
             except Exception:
-                DebugWindow._instance = None
+                cls._instance = None
+        return cls(tray_app, root)
 
+    def __init__(self, tray_app, root):
         DebugWindow._instance = self
         self._tray_app = tray_app
 
         import tkinter as tk
         from tkinter import ttk
 
-        self._root = tk.Tk()
-        self._root.title("MouseWatch Debug")
-        self._root.resizable(False, False)
-        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._window = tk.Toplevel(root)
+        self._window.title("MouseWatch Debug")
+        self._window.resizable(False, False)
+        self._window.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        frame = ttk.Frame(self._root, padding=16)
+        frame = ttk.Frame(self._window, padding=16)
         frame.grid(sticky="nsew")
 
         self._text = tk.Text(frame, width=70, height=20, font=("Consolas", 10),
@@ -40,7 +46,8 @@ class DebugWindow:
             row=1, column=1, pady=(8, 0), sticky="w", padx=4)
 
         self._refresh()
-        self._root.mainloop()
+        self._window.lift()
+        self._window.focus_force()
 
     def _refresh(self):
         app = self._tray_app
@@ -59,4 +66,4 @@ class DebugWindow:
 
     def _on_close(self):
         DebugWindow._instance = None
-        self._root.destroy()
+        self._window.destroy()

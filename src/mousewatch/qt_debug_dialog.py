@@ -1,13 +1,25 @@
-from common import Common
-from mw_platform import (
-    IS_WINDOWS,
-    QDialog,
-    QHBoxLayout,
-    QPlainTextEdit,
-    QPushButton,
-    Qt,
-    QVBoxLayout,
-)
+try:
+    from .common import Common
+    from .mw_platform import (
+        IS_WINDOWS,
+        QDialog,
+        QHBoxLayout,
+        QPlainTextEdit,
+        QPushButton,
+        Qt,
+        QVBoxLayout,
+    )
+except ImportError:
+    from common import Common
+    from mw_platform import (
+        IS_WINDOWS,
+        QDialog,
+        QHBoxLayout,
+        QPlainTextEdit,
+        QPushButton,
+        Qt,
+        QVBoxLayout,
+    )
 
 
 if not IS_WINDOWS:

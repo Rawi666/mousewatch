@@ -1,10 +1,15 @@
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
-from mw_platform import IS_LINUX, IS_WINDOWS, hid
-from settings_store import save_settings, set_startup
+try:
+    from .mw_platform import IS_LINUX, IS_WINDOWS, hid
+    from .settings_store import save_settings, set_startup
+except ImportError:
+    from mw_platform import IS_LINUX, IS_WINDOWS, hid
+    from settings_store import save_settings, set_startup
 
 
 def notify_windows(title: str, message: str, sound: bool = True):
@@ -35,8 +40,8 @@ def notify_windows(title: str, message: str, sound: bool = True):
 def safe_notify(title: str, message: str, sound: bool = True):
     try:
         notify_windows(title, message, sound=sound)
-    except Exception:
-        pass
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Notification error: {exc}")
 
 
 class Common:
@@ -63,6 +68,7 @@ class Common:
     _last_input_decoded: list[int] | None
     _last_input_time: str | None
     _last_debug_refresh_time: str | None
+    _state_lock: threading.RLock
 
     def _notify(self, title: str, message: str):
         raise NotImplementedError
@@ -83,6 +89,45 @@ class Common:
         return protocol.format_status_text(model, level, charging)
 
     @staticmethod
+    def init_runtime_state(
+        app,
+        protocol,
+        model: str,
+        hid_path: bytes | None,
+        initial_resp: dict | None,
+        settings: dict,
+        available_protocols: list[Any] | None = None,
+    ):
+        """Initialize shared runtime state used by both tray implementations."""
+        app.protocol = protocol
+        app.available_protocols = available_protocols or [protocol]
+        app.model = model
+        app.hid_path = hid_path
+        app.threshold = settings["threshold"]
+        app.interval = settings["poll_interval"]
+        app.reminder_interval = settings["reminder_interval"]
+        app.notification_sound = settings["notification_sound"]
+        app.device_notifications = settings["device_notifications"]
+        app.notified_at = None
+        app._last_notify_time = 0
+        app._notified_full = False
+        if initial_resp is None:
+            app.level = 0
+            app.charging = False
+            app.device_online = False
+        else:
+            app.level, app.charging = Common.status_from_response(protocol, initial_resp)
+            app.device_online = bool(initial_resp.get("device_online", True))
+        app._stop_event = threading.Event()
+        app._poll_interrupt = threading.Event()
+        app._last_input_raw = None
+        app._last_input_decoded = None
+        app._last_input_time = None
+        app._last_debug_refresh_time = None
+        app._state_lock = threading.RLock()
+        app.status_text = app._status_text()
+
+    @staticmethod
     def query_battery_retry(protocol, hid_path: bytes, retries: int = 5, delay: float = 2.0) -> dict | None:
         resp = protocol.query_battery(hid_path)
         for _ in range(retries):
@@ -100,12 +145,14 @@ class Common:
 
     @staticmethod
     def apply_settings_to_app(app, settings: dict):
-        app.threshold = settings["threshold"]
-        app.reminder_interval = settings["reminder_interval"]
-        app.notification_sound = settings["notification_sound"]
-        app.device_notifications = settings["device_notifications"]
-        if app.interval != settings["poll_interval"]:
+        with app._state_lock:
+            app.threshold = settings["threshold"]
+            app.reminder_interval = settings["reminder_interval"]
+            app.notification_sound = settings["notification_sound"]
+            app.device_notifications = settings["device_notifications"]
+            poll_interval_changed = app.interval != settings["poll_interval"]
             app.interval = settings["poll_interval"]
+        if poll_interval_changed:
             app._poll_interrupt.set()
 
     @staticmethod
@@ -116,25 +163,35 @@ class Common:
 
     @staticmethod
     def build_debug_lines(app, snapshot: dict | None, section_title: str = "Last E2 Input Report") -> list[str]:
+        lock = getattr(app, "_state_lock", None)
+        guard = lock if lock is not None else nullcontext()
+        with guard:
+            protocol = app.protocol
+            model_name = protocol.format_model_name(app.model)
+            level = app.level
+            charging = app.charging
+            last_refresh = app._last_debug_refresh_time
+            last_input_time = app._last_input_time
+            last_input_raw = list(app._last_input_raw) if app._last_input_raw is not None else None
+            last_input_decoded = list(app._last_input_decoded) if app._last_input_decoded is not None else None
+
         lines = []
-        lines.append(f"Model:   {app.protocol.format_model_name(app.model)}")
-        lines.append(f"Battery: {app.level}%")
-        lines.append(f"Status:  {'Charging' if app.charging else 'Wireless'}")
-        if app._last_debug_refresh_time:
-            lines.append(f"Refreshed: {app._last_debug_refresh_time}")
+        lines.append(f"Model:   {model_name}")
+        lines.append(f"Battery: {level}%")
+        lines.append(f"Status:  {'Charging' if charging else 'Wireless'}")
+        if last_refresh:
+            lines.append(f"Refreshed: {last_refresh}")
         lines.append("")
         lines.append(section_title)
 
-        if app._last_input_time:
-            lines.append(f"Time:    {app._last_input_time}")
-            raw = app._last_input_raw
-            dec = app._last_input_decoded
-            if raw is not None:
-                lines.append(f"Raw:     {' '.join(f'{b:02X}' for b in raw)}")
-            if dec is not None:
-                lines.append(f"Decoded: {' '.join(f'{b:02X}' for b in dec)}")
+        if last_input_time:
+            lines.append(f"Time:    {last_input_time}")
+            if last_input_raw is not None:
+                lines.append(f"Raw:     {' '.join(f'{b:02X}' for b in last_input_raw)}")
+            if last_input_decoded is not None:
+                lines.append(f"Decoded: {' '.join(f'{b:02X}' for b in last_input_decoded)}")
                 lines.append("")
-                app.protocol.append_debug_input_details(lines, dec)
+                protocol.append_debug_input_details(lines, last_input_decoded)
         else:
             lines.append("No input reports received yet.")
 
@@ -152,8 +209,9 @@ class Common:
         return Common.format_status_text(self.protocol, self.model, self.level, self.charging)
 
     def _set_disconnected_state(self):
-        self.device_online = False
-        self.status_text = self._status_text()
+        with self._state_lock:
+            self.device_online = False
+            self.status_text = self._status_text()
         self._update_ui_status()
 
     def _ordered_device_paths(self, devices: list[dict]) -> list[bytes]:
@@ -175,26 +233,31 @@ class Common:
 
     def _recover_path_and_query(self, retries: int = 5, delay: float = 2.0) -> dict | None:
         """Try current path first, then scan candidate interfaces and switch on success."""
-        if self.hid_path is not None:
-            resp = Common.query_battery_retry(self.protocol, self.hid_path, retries=retries, delay=delay)
+        with self._state_lock:
+            current_protocol = self.protocol
+            current_path = self.hid_path
+
+        if current_path is not None:
+            resp = Common.query_battery_retry(current_protocol, current_path, retries=retries, delay=delay)
             if resp is not None:
                 return resp
 
-        devices = self.protocol.discover_devices()
+        devices = current_protocol.discover_devices()
         for path in self._ordered_device_paths(devices):
-            if path == self.hid_path:
+            if path == current_path:
                 continue
 
-            candidate = Common.query_after_throwaway(self.protocol, path, settle_delay=0.05)
+            candidate = Common.query_after_throwaway(current_protocol, path, settle_delay=0.05)
             if candidate is None:
                 continue
 
-            self.hid_path = path
+            with self._state_lock:
+                self.hid_path = path
             return candidate
 
         # If current protocol has no viable responder, try alternate protocols.
         for alt_protocol in getattr(self, "available_protocols", []):
-            if alt_protocol is self.protocol:
+            if alt_protocol is current_protocol:
                 continue
 
             detected = alt_protocol.autodetect(Common)
@@ -202,12 +265,13 @@ class Common:
                 continue
 
             model, hid_path, resp = detected
-            self.protocol = alt_protocol
-            self.model = model
-            self.hid_path = hid_path
-            self._last_input_raw = None
-            self._last_input_decoded = None
-            self._last_input_time = None
+            with self._state_lock:
+                self.protocol = alt_protocol
+                self.model = model
+                self.hid_path = hid_path
+                self._last_input_raw = None
+                self._last_input_decoded = None
+                self._last_input_time = None
             return resp
 
         return None
@@ -222,64 +286,93 @@ class Common:
             self._set_disconnected_state()
             return "No mouse detected. Waiting for device..."
 
-        self.device_online = True
-        self.level, self.charging = Common.status_from_response(self.protocol, resp)
-        self.status_text = self._status_text()
+        with self._state_lock:
+            self.device_online = True
+            self.level, self.charging = Common.status_from_response(self.protocol, resp)
+            self.status_text = self._status_text()
         self._update_ui_status()
         return f"{self.status_text}\nUpdated at {time.strftime('%H:%M:%S')}"
 
     def refresh_debug_snapshot(self) -> dict | None:
         """Force a fresh HID read for the debug dialog and update visible state."""
         resp = self._recover_path_and_query()
-        self._last_debug_refresh_time = time.strftime("%H:%M:%S")
+        with self._state_lock:
+            self._last_debug_refresh_time = time.strftime("%H:%M:%S")
         if resp is None:
             self._set_disconnected_state()
             return None
 
-        self.device_online = True
-        self.level, self.charging = Common.status_from_response(self.protocol, resp)
-        self.status_text = self._status_text()
+        with self._state_lock:
+            self.device_online = True
+            self.level, self.charging = Common.status_from_response(self.protocol, resp)
+            self.status_text = self._status_text()
         self._update_ui_status()
         return resp
 
     def _handle_full_charge_notification(self):
-        if self.level == 100 and self.charging and not self._notified_full:
-            self._notified_full = True
+        with self._state_lock:
+            level = self.level
+            charging = self.charging
+            already_notified = self._notified_full
+            model = self.model
+            protocol = self.protocol
+
+        if level == 100 and charging and not already_notified:
+            with self._state_lock:
+                self._notified_full = True
             self._notify(
                 "MouseWatch - Fully Charged",
-                f"{self.protocol.format_model_name(self.model)} is fully charged",
+                f"{protocol.format_model_name(model)} is fully charged",
             )
-        elif not self.charging or self.level < 100:
-            self._notified_full = False
+        elif not charging or level < 100:
+            with self._state_lock:
+                self._notified_full = False
 
     def _handle_low_battery_notification(self):
         now = time.time()
-        if (self.level <= self.threshold and not self.charging
-                and (now - self._last_notify_time) >= self.reminder_interval):
-            self._last_notify_time = now
+        with self._state_lock:
+            level = self.level
+            threshold = self.threshold
+            charging = self.charging
+            reminder_interval = self.reminder_interval
+            last_notify_time = self._last_notify_time
+            model = self.model
+            protocol = self.protocol
+
+        if (level <= threshold and not charging
+                and (now - last_notify_time) >= reminder_interval):
+            with self._state_lock:
+                self._last_notify_time = now
             self._notify(
                 "MouseWatch - Low Battery",
-                f"{self.protocol.format_model_name(self.model)} battery is at {self.level}%",
+                f"{protocol.format_model_name(model)} battery is at {level}%",
             )
-        elif self.level > self.threshold:
-            self._last_notify_time = 0
+        elif level > threshold:
+            with self._state_lock:
+                self._last_notify_time = 0
 
     def _input_listener(self):
         while not self._stop_event.is_set():
             # Stay alive across protocol switches. For protocols that do not use
             # persistent input reports, idle and re-check later.
-            if not getattr(self.protocol, "supports_input_listener", False):
+            with self._state_lock:
+                protocol = self.protocol
+                hid_path = self.hid_path
+
+            if not getattr(protocol, "supports_input_listener", False):
                 if self._stop_event.wait(2):
                     break
                 continue
 
-            current_devices = self.protocol.discover_devices()
+            current_devices = protocol.discover_devices()
             current_paths = {d["path"] for d in current_devices}
 
-            if self.hid_path not in current_paths:
+            if hid_path not in current_paths:
                 replacement = self._pick_first_available_path(current_devices)
                 if replacement is not None:
-                    self.hid_path = replacement
+                    with self._state_lock:
+                        self.hid_path = replacement
+                    hid_path = replacement
                 else:
                     if self._stop_event.wait(5):
                         break
@@ -288,9 +381,10 @@ class Common:
 
             try:
                 dev = hid.device()
-                dev.open_path(self.hid_path)
+                dev.open_path(hid_path)
                 dev.set_nonblocking(False)
-            except Exception:
+            except (OSError, ValueError) as exc:
+                print(f"Input listener open error: {exc}")
                 if self._stop_event.wait(2):
                     break
                 continue
@@ -299,34 +393,42 @@ class Common:
                 while not self._stop_event.is_set():
                     try:
                         raw = dev.read(64, timeout_ms=1000)
-                    except Exception:
+                    except (OSError, ValueError) as exc:
+                        print(f"Input listener read error: {exc}")
                         break
 
                     if not raw:
                         continue
 
-                    decoded, parsed = self.protocol.decode_input_report(list(raw))
-                    self._last_input_raw = list(raw)
-                    self._last_input_decoded = list(decoded)
-                    self._last_input_time = time.strftime("%H:%M:%S")
+                    decoded, parsed = protocol.decode_input_report(list(raw))
+                    with self._state_lock:
+                        self._last_input_raw = list(raw)
+                        self._last_input_decoded = list(decoded)
+                        self._last_input_time = time.strftime("%H:%M:%S")
 
                     if parsed is None:
                         continue
 
-                    self.device_online = True
-                    battery_level = parsed["battery_level"]
-
-                    old_charging = self.charging
-                    self.level = battery_level
-                    self.charging = bool(parsed["charging"])
-                    self.status_text = self._status_text()
+                    with self._state_lock:
+                        self.device_online = True
+                        battery_level = parsed["battery_level"]
+                        old_charging = self.charging
+                        self.level = battery_level
+                        self.charging = bool(parsed["charging"])
+                        self.status_text = self._status_text()
                     self._update_ui_status()
 
-                    if self.charging != old_charging and self.device_notifications:
+                    with self._state_lock:
+                        is_charging = self.charging
+                        level = self.level
+                        model = self.model
+                        device_notifications = self.device_notifications
+
+                    if is_charging != old_charging and device_notifications:
                         msg = (
-                            f"{self.protocol.format_model_name(self.model)} is charging ({self.level}%)"
-                            if self.charging
-                            else f"{self.protocol.format_model_name(self.model)} unplugged ({self.level}%)"
+                            f"{protocol.format_model_name(model)} is charging ({level}%)"
+                            if is_charging
+                            else f"{protocol.format_model_name(model)} unplugged ({level}%)"
                         )
                         self._notify("MouseWatch", msg)
 
@@ -334,25 +436,31 @@ class Common:
             finally:
                 try:
                     dev.close()
-                except Exception:
-                    pass
+                except OSError:
+                    print("Warning: failed to close input listener HID handle")
                 if not self._stop_event.is_set():
                     self._stop_event.wait(2)
 
     def _device_watcher(self):
-        known_paths = {d["path"] for d in self.protocol.discover_devices()}
+        with self._state_lock:
+            protocol = self.protocol
+        known_paths = {d["path"] for d in protocol.discover_devices()}
         while not self._stop_event.wait(5):
-            current_devices = self.protocol.discover_devices()
+            with self._state_lock:
+                protocol = self.protocol
+                current_hid_path = self.hid_path
+            current_devices = protocol.discover_devices()
             current_paths = {d["path"] for d in current_devices}
             if current_paths != known_paths:
                 added = current_paths - known_paths
                 removed = known_paths - current_paths
                 known_paths = current_paths
 
-                if self.hid_path in removed and current_paths:
+                if current_hid_path in removed and current_paths:
                     replacement = self._pick_first_available_path(current_devices)
                     if replacement is not None:
-                        self.hid_path = replacement
+                        with self._state_lock:
+                            self.hid_path = replacement
 
                 self._poll_interrupt.set()
                 if self.device_notifications:
@@ -383,9 +491,10 @@ class Common:
 
             consecutive_failures = 0
 
-            self.device_online = True
-            self.level, self.charging = Common.status_from_response(self.protocol, resp)
-            self.status_text = self._status_text()
+            with self._state_lock:
+                self.level, self.charging = Common.status_from_response(self.protocol, resp)
+                self.status_text = self._status_text()
+                self.device_online = True
             self._update_ui_status()
             self._handle_full_charge_notification()
             self._handle_low_battery_notification()

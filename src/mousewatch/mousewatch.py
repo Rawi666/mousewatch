@@ -5,18 +5,26 @@ import os
 import sys
 import time
 
-from common import Common
-from common import safe_notify
-from mw_platform import IS_LINUX, IS_WINDOWS
-from protocols import (
+if __package__ in {None, ""}:
+    # Support running as a script: python src/mousewatch/mousewatch.py
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _src_dir = os.path.dirname(_script_dir)
+    if _script_dir in sys.path:
+        sys.path.remove(_script_dir)
+    if _src_dir not in sys.path:
+        sys.path.insert(0, _src_dir)
+
+from mousewatch.common import Common
+from mousewatch.common import safe_notify
+from mousewatch.mw_platform import IS_LINUX, IS_WINDOWS, QT_AVAILABLE, QT_IMPORT_ERROR
+from mousewatch.protocols import (
     autodetect_any,
     get_protocol_by_key,
     get_protocol_keys,
     get_protocol_order,
 )
-from qt_tray_app import QtTrayApp
-from settings_store import load_settings
-from tray_app import TrayApp
+from mousewatch.settings_store import load_settings, sanitize_settings
+from mousewatch.tray_app import TrayApp
 
 
 def run_cli(protocol, model, hid_path, args):
@@ -161,10 +169,7 @@ def main():
         settings["threshold"] = args.threshold
     if args.interval is not None:
         settings["poll_interval"] = args.interval
-
-    if settings["threshold"] < 1 or settings["threshold"] > 100:
-        print("Error: threshold must be between 1 and 100")
-        sys.exit(1)
+    settings = sanitize_settings(settings)
 
     # --once implies --nogui
     if args.once:
@@ -226,6 +231,10 @@ def main():
 
     if protocol is None:
         protocol = protocols[0]
+
+    if not args.nogui and IS_LINUX and not QT_AVAILABLE:
+        print(f"Qt GUI dependencies are unavailable ({QT_IMPORT_ERROR}); switching to CLI mode (--nogui).")
+        args.nogui = True
 
     if args.nogui:
         # CLI mode: interactive detection with prompts
@@ -329,6 +338,8 @@ def main():
         args.interval = settings["poll_interval"]
         run_cli(protocol, model, hid_path, args)
     else:
+        from mousewatch.qt_tray_app import QtTrayApp
+
         if IS_WINDOWS:
             app = TrayApp(protocol, model, hid_path, resp, settings, available_protocols=protocols)
         else:

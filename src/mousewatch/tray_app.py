@@ -1,11 +1,21 @@
 import threading
 
-from common import Common
-from common import safe_notify
-from debug_window import DebugWindow
-from icon_factory import create_windows_battery_icon, create_windows_unknown_battery_icon
-from mw_platform import IS_LINUX
-from settings_window import SettingsWindow
+try:
+    from .common import Common
+    from .common import safe_notify
+    from .debug_window import DebugWindow
+    from .icon_factory import create_windows_battery_icon, create_windows_unknown_battery_icon
+    from .mw_platform import IS_LINUX
+    from .settings_window import SettingsWindow
+    from .tk_ui_dispatcher import TkUiDispatcher
+except ImportError:
+    from common import Common
+    from common import safe_notify
+    from debug_window import DebugWindow
+    from icon_factory import create_windows_battery_icon, create_windows_unknown_battery_icon
+    from mw_platform import IS_LINUX
+    from settings_window import SettingsWindow
+    from tk_ui_dispatcher import TkUiDispatcher
 
 
 class TrayApp(Common):
@@ -13,37 +23,26 @@ class TrayApp(Common):
 
     def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
                  settings: dict, available_protocols: list | None = None):
-        self.protocol = protocol
-        self.available_protocols = available_protocols or [protocol]
-        self.model = model
-        self.hid_path = hid_path
-        self.threshold = settings["threshold"]
-        self.interval = settings["poll_interval"]
-        self.reminder_interval = settings["reminder_interval"]
-        self.notification_sound = settings["notification_sound"]
-        self.device_notifications = settings["device_notifications"]
-        self.notified_at = None
-        self._last_notify_time = 0
-        self._notified_full = False
-        if initial_resp is None:
-            self.level = 0
-            self.charging = False
-            self.device_online = False
-        else:
-            self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
-            self.device_online = bool(initial_resp.get("device_online", True))
-        self.status_text = self._status_text()
-        self._stop_event = threading.Event()
-        self._poll_interrupt = threading.Event()
+        Common.init_runtime_state(
+            self,
+            protocol,
+            model,
+            hid_path,
+            initial_resp,
+            settings,
+            available_protocols=available_protocols,
+        )
         self.icon = None
-        self._last_input_raw = None
-        self._last_input_decoded = None
-        self._last_input_time = None
         self._menu_supported = True
-        self._fallback_ui_started = False
-        self._last_debug_refresh_time = None
         self._status_refresh_active = False
         self._status_refresh_lock = threading.Lock()
+        self._ui_dispatcher: TkUiDispatcher | None = None
+        self._control_window = None
+
+    def _ensure_ui_dispatcher(self):
+        if self._ui_dispatcher is None:
+            self._ui_dispatcher = TkUiDispatcher()
+            self._ui_dispatcher.start()
 
     def _create_menu(self):
         import pystray
@@ -89,38 +88,58 @@ class TrayApp(Common):
     def _on_settings(self, icon, item):
         _ = icon
         _ = item
-        threading.Thread(target=SettingsWindow, args=(self,), daemon=True).start()
+        self._ensure_ui_dispatcher()
+        assert self._ui_dispatcher is not None
+        self._ui_dispatcher.invoke(SettingsWindow.open, self, self._ui_dispatcher.root)
 
     def _on_debug(self, icon, item):
         _ = icon
         _ = item
-        threading.Thread(target=DebugWindow, args=(self,), daemon=True).start()
+        self._ensure_ui_dispatcher()
+        assert self._ui_dispatcher is not None
+        self._ui_dispatcher.invoke(DebugWindow.open, self, self._ui_dispatcher.root)
 
     def _on_quit(self, icon, item):
         _ = icon
         _ = item
         self._stop_event.set()
         self._poll_interrupt.set()
+        if self._ui_dispatcher is not None:
+            self._ui_dispatcher.stop()
         icon.stop()
 
     def _on_quit_direct(self):
         self._stop_event.set()
         self._poll_interrupt.set()
+        if self._ui_dispatcher is not None:
+            self._ui_dispatcher.stop()
         if self.icon:
             self.icon.stop()
 
-    def _run_fallback_control_window(self):
+    def _open_fallback_control_window(self):
         """Show controls when tray backend cannot render context menus."""
-        if self._fallback_ui_started:
-            return
-        self._fallback_ui_started = True
+        if self._control_window is not None:
+            try:
+                self._control_window.lift()
+                self._control_window.focus_force()
+                return
+            except Exception:
+                self._control_window = None
 
         import tkinter as tk
         from tkinter import ttk
 
-        root = tk.Tk()
+        assert self._ui_dispatcher is not None
+        root = tk.Toplevel(self._ui_dispatcher.root)
         root.title("MouseWatch")
         root.resizable(False, False)
+        self._control_window = root
+
+        def _on_close():
+            self._control_window = None
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", _on_close)
 
         frame = ttk.Frame(root, padding=12)
         frame.grid(sticky="nsew")
@@ -149,14 +168,17 @@ class TrayApp(Common):
         )
 
         def ticker():
-            status_var.set(self.status_text)
+            with self._state_lock:
+                status_var.set(self.status_text)
             if not self._stop_event.is_set():
                 root.after(1000, ticker)
             else:
                 root.destroy()
+                self._control_window = None
 
         root.after(1000, ticker)
-        root.mainloop()
+        root.lift()
+        root.focus_force()
 
     def run(self):
         import pystray
@@ -177,7 +199,9 @@ class TrayApp(Common):
         if IS_LINUX and not self._menu_supported:
             print("Tray backend has no menu support on this Linux session.")
             print("Opening MouseWatch control window for Settings/Debug/Quit.")
-            threading.Thread(target=self._run_fallback_control_window, daemon=True).start()
+            self._ensure_ui_dispatcher()
+            assert self._ui_dispatcher is not None
+            self._ui_dispatcher.invoke(self._open_fallback_control_window)
 
         poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         poll_thread.start()

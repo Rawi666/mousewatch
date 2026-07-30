@@ -1,16 +1,31 @@
-from common import Common
-from mw_platform import (
-    IS_WINDOWS,
-    QCheckBox,
-    QDialog,
-    QFormLayout,
-    QHBoxLayout,
-    QPushButton,
-    QSpinBox,
-    Qt,
-    QVBoxLayout,
-)
-from settings_store import startup_shortcut_exists
+try:
+    from .common import Common
+    from .mw_platform import (
+        IS_WINDOWS,
+        QCheckBox,
+        QDialog,
+        QFormLayout,
+        QHBoxLayout,
+        QPushButton,
+        QSpinBox,
+        Qt,
+        QVBoxLayout,
+    )
+    from .settings_store import startup_shortcut_exists
+except ImportError:
+    from common import Common
+    from mw_platform import (
+        IS_WINDOWS,
+        QCheckBox,
+        QDialog,
+        QFormLayout,
+        QHBoxLayout,
+        QPushButton,
+        QSpinBox,
+        Qt,
+        QVBoxLayout,
+    )
+    from settings_store import startup_shortcut_exists
 
 
 if not IS_WINDOWS:

@@ -3,22 +3,37 @@ import sys
 import threading
 import time
 
-from common import Common
-from icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
-from mw_platform import (
-    IS_WINDOWS,
-    QAction,
-    QApplication,
-    QMenu,
-    QObject,
-    QSystemTrayIcon,
-    Signal,
-)
-from qt_debug_dialog import QtDebugDialog
-from qt_settings_dialog import QtSettingsDialog
+try:
+    from .common import Common
+    from .icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
+    from .mw_platform import (
+        IS_WINDOWS,
+        QAction,
+        QApplication,
+        QMenu,
+        QObject,
+        QSystemTrayIcon,
+        Signal,
+    )
+    from .qt_debug_dialog import QtDebugDialog
+    from .qt_settings_dialog import QtSettingsDialog
+except ImportError:
+    from common import Common
+    from icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
+    from mw_platform import (
+        IS_WINDOWS,
+        QAction,
+        QApplication,
+        QMenu,
+        QObject,
+        QSystemTrayIcon,
+        Signal,
+    )
+    from qt_debug_dialog import QtDebugDialog
+    from qt_settings_dialog import QtSettingsDialog
 
 
-if not IS_WINDOWS:
+if not IS_WINDOWS and QObject is not None:
     class QtTrayApp(QObject, Common):
         """Qt system tray application for MouseWatch."""
 
@@ -28,33 +43,16 @@ if not IS_WINDOWS:
         def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
                      settings: dict, is_autostart: bool = False, available_protocols: list | None = None):
             super().__init__()
-            self.protocol = protocol
-            self.available_protocols = available_protocols or [protocol]
-            self.model = model
-            self.hid_path = hid_path
             self.is_autostart = is_autostart
-            self.threshold = settings["threshold"]
-            self.interval = settings["poll_interval"]
-            self.reminder_interval = settings["reminder_interval"]
-            self.notification_sound = settings["notification_sound"]
-            self.device_notifications = settings["device_notifications"]
-            self.notified_at = None
-            self._last_notify_time = 0
-            self._notified_full = False
-            if initial_resp is None:
-                self.level = 0
-                self.charging = False
-                self.device_online = False
-            else:
-                self.level, self.charging = Common.status_from_response(self.protocol, initial_resp)
-                self.device_online = bool(initial_resp.get("device_online", True))
-            self.status_text = self._status_text()
-            self._stop_event = threading.Event()
-            self._poll_interrupt = threading.Event()
-            self._last_input_raw = None
-            self._last_input_decoded = None
-            self._last_input_time = None
-            self._last_debug_refresh_time = None
+            Common.init_runtime_state(
+                self,
+                protocol,
+                model,
+                hid_path,
+                initial_resp,
+                settings,
+                available_protocols=available_protocols,
+            )
             self._settings_dialog = None
             self._debug_dialog = None
             self._status_refresh_active = False
@@ -195,4 +193,4 @@ else:
             _ = (protocol, model, hid_path, initial_resp, settings, is_autostart, available_protocols)
 
         def run(self):
-            raise RuntimeError("QtTrayApp is only available on Linux")
+            raise RuntimeError("QtTrayApp is unavailable (Linux with PySide6 required)")

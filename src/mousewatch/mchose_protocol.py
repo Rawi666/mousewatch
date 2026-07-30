@@ -7,8 +7,12 @@ Other mouse protocols (for example ATK) are implemented in `protocols.py`.
 import struct
 import time
 
-from device_ids import MCHOSE_VENDOR_IDS
-from mw_platform import IS_LINUX, hid
+try:
+    from .device_ids import MCHOSE_VENDOR_IDS
+    from .mw_platform import IS_LINUX, hid
+except ImportError:
+    from device_ids import MCHOSE_VENDOR_IDS
+    from mw_platform import IS_LINUX, hid
 
 ALL_VIDS = list(MCHOSE_VENDOR_IDS)
 
@@ -93,6 +97,7 @@ def find_wired_mchose() -> dict | None:
 
 def query_battery(path: bytes) -> dict | None:
     """Send the status command and parse the response."""
+    dev = None
     try:
         dev = hid.device()
         dev.open_path(path)
@@ -105,7 +110,6 @@ def query_battery(path: bytes) -> dict | None:
         time.sleep(0.05)
 
         raw = dev.get_feature_report(REPORT_ID, 21)
-        dev.close()
 
         if not raw or len(raw) < 12:
             return None
@@ -142,6 +146,12 @@ def query_battery(path: bytes) -> dict | None:
         if "open failed" not in err.lower() and "read error" not in err.lower():
             print(f"  [!] HID error: {err}")
         return None
+    finally:
+        if dev is not None:
+            try:
+                dev.close()
+            except OSError:
+                print("  [!] Failed to close MCHOSE HID handle")
 
 
 def resolve_model_from_response(resp: dict) -> str | None:
@@ -149,31 +159,6 @@ def resolve_model_from_response(resp: dict) -> str | None:
     for name, info in MOUSE_DB.items():
         if resp["pid"] == info["inner_pid"]:
             return name
-    return None
-
-
-def autodetect(common_cls) -> tuple[str, bytes, dict] | None:
-    """Auto-detect a connected MCHOSE mouse."""
-    devices = find_mchose_devices()
-    if not devices:
-        return None
-
-    for dev in devices:
-        resp = common_cls.query_after_throwaway(dev["path"])
-        if resp is None:
-            continue
-
-        model = resolve_model_from_response(resp)
-        if model is None:
-            name = (dev.get("product_string") or "").replace("MCHOSE ", "")
-            if name:
-                model = name
-
-        if model is None:
-            continue
-
-        return model, dev["path"], resp
-
     return None
 
 
