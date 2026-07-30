@@ -1,6 +1,16 @@
 import json
 
 from mousewatch.settings_store import DEFAULTS, load_settings, sanitize_settings, save_settings
+from mousewatch.mw_platform import IS_WINDOWS
+
+
+def _settings_path_for_test(tmp_path, monkeypatch):
+    if IS_WINDOWS:
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        return tmp_path / "MouseWatch" / "settings.json"
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    return tmp_path / "mousewatch" / "settings.json"
 
 
 def test_sanitize_settings_clamps_and_coerces_types():
@@ -24,10 +34,9 @@ def test_sanitize_settings_clamps_and_coerces_types():
 
 
 def test_load_settings_falls_back_to_defaults_on_invalid_json(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    config_dir = tmp_path / "mousewatch"
-    config_dir.mkdir(parents=True)
-    (config_dir / "settings.json").write_text("{invalid json", encoding="utf-8")
+    path = _settings_path_for_test(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text("{invalid json", encoding="utf-8")
 
     result = load_settings()
 
@@ -35,7 +44,7 @@ def test_load_settings_falls_back_to_defaults_on_invalid_json(tmp_path, monkeypa
 
 
 def test_save_settings_persists_sanitized_values(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    path = _settings_path_for_test(tmp_path, monkeypatch)
 
     save_settings({
         "threshold": -20,
@@ -46,7 +55,6 @@ def test_save_settings_persists_sanitized_values(tmp_path, monkeypatch):
         "start_with_windows": "on",
     })
 
-    path = tmp_path / "mousewatch" / "settings.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
 
     assert saved["threshold"] == 1
