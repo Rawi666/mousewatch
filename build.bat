@@ -25,6 +25,14 @@ if errorlevel 1 (
 )
 
 echo.
+echo Running test suite...
+"%VENV_PY%" -m pytest -q
+if errorlevel 1 (
+    echo ERROR: Tests failed. Aborting build.
+    goto :fail
+)
+
+echo.
 echo Building MouseWatch.exe...
 "%VENV_PY%" -m PyInstaller --onefile --noconsole --name MouseWatch src\mousewatch\mousewatch.py
 if errorlevel 1 (

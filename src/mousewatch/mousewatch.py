@@ -5,26 +5,31 @@ import os
 import sys
 import time
 
-if __package__ in {None, ""}:
-    # Support running as a script: python src/mousewatch/mousewatch.py
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _src_dir = os.path.dirname(_script_dir)
-    if _script_dir in sys.path:
-        sys.path.remove(_script_dir)
-    if _src_dir not in sys.path:
-        sys.path.insert(0, _src_dir)
-
-from mousewatch.common import Common
-from mousewatch.common import safe_notify
-from mousewatch.mw_platform import IS_LINUX, IS_WINDOWS, QT_AVAILABLE, QT_IMPORT_ERROR
-from mousewatch.protocols import (
-    autodetect_any,
-    get_protocol_by_key,
-    get_protocol_keys,
-    get_protocol_order,
-)
-from mousewatch.settings_store import load_settings, sanitize_settings
-from mousewatch.tray_app import TrayApp
+try:
+    from .common import Common
+    from .common import safe_notify
+    from .mw_platform import IS_LINUX, IS_WINDOWS, QT_AVAILABLE, QT_IMPORT_ERROR
+    from .protocols import (
+        autodetect_any,
+        get_protocol_by_key,
+        get_protocol_keys,
+        get_protocol_order,
+    )
+    from .settings_store import load_settings, sanitize_settings
+    from .tray_app import TrayApp
+except ImportError:
+    # Script execution and PyInstaller one-file execution expose top-level modules.
+    from common import Common
+    from common import safe_notify
+    from mw_platform import IS_LINUX, IS_WINDOWS, QT_AVAILABLE, QT_IMPORT_ERROR
+    from protocols import (
+        autodetect_any,
+        get_protocol_by_key,
+        get_protocol_keys,
+        get_protocol_order,
+    )
+    from settings_store import load_settings, sanitize_settings
+    from tray_app import TrayApp
 
 
 def run_cli(protocol, model, hid_path, args):
@@ -338,7 +343,10 @@ def main():
         args.interval = settings["poll_interval"]
         run_cli(protocol, model, hid_path, args)
     else:
-        from mousewatch.qt_tray_app import QtTrayApp
+        try:
+            from .qt_tray_app import QtTrayApp
+        except ImportError:
+            from qt_tray_app import QtTrayApp
 
         if IS_WINDOWS:
             app = TrayApp(protocol, model, hid_path, resp, settings, available_protocols=protocols)

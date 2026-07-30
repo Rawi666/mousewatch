@@ -34,9 +34,12 @@ Linux helper scripts:
 ```bash
 ./create_venv.sh
 ./run.sh
+./build.sh
 ```
 
 `./run.sh` automatically creates the venv first if it does not exist.
+
+`./build.sh` creates/updates the venv, installs `requirements-dev.txt`, runs tests, then builds a standalone binary with PyInstaller.
 
 Windows helper scripts:
 
@@ -48,6 +51,7 @@ run.bat
 ```powershell
 .\create_venv.ps1
 .\run.ps1
+.\build.ps1
 ```
 
 `run.bat` and `run.ps1` automatically create the venv first if it does not exist.
@@ -174,8 +178,11 @@ install.bat
 This builds a standalone `MouseWatch.exe` and adds it to Windows startup. Run `uninstall.bat` to remove.
 
 `build.bat` installs development/build dependencies from `requirements-dev.txt` before running `python -m PyInstaller`.
+PowerShell equivalent: `./build.ps1`.
 
 **Linux:** Use the **Start on login** toggle in Settings. This creates an XDG autostart entry at `~/.config/autostart/mousewatch.desktop`.
+
+To build a Linux standalone binary manually, run `./build.sh`.
 
 ## Platform differences
 

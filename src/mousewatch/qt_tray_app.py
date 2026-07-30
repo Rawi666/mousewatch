@@ -5,6 +5,7 @@ import time
 
 try:
     from .common import Common
+    from .common import safe_notify
     from .icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
     from .mw_platform import (
         IS_WINDOWS,
@@ -19,6 +20,7 @@ try:
     from .qt_settings_dialog import QtSettingsDialog
 except ImportError:
     from common import Common
+    from common import safe_notify
     from icon_factory import create_qt_battery_icon, create_qt_unknown_battery_icon
     from mw_platform import (
         IS_WINDOWS,
@@ -38,7 +40,6 @@ if not IS_WINDOWS and QObject is not None:
         """Qt system tray application for MouseWatch."""
 
         status_changed = Signal(int, bool, str)
-        notification_requested = Signal(str, str)
 
         def __init__(self, protocol, model: str, hid_path: bytes | None, initial_resp: dict | None,
                      settings: dict, is_autostart: bool = False, available_protocols: list | None = None):
@@ -88,7 +89,6 @@ if not IS_WINDOWS and QObject is not None:
             self.tray.setContextMenu(self._menu)
 
             self.status_changed.connect(self._apply_status)
-            self.notification_requested.connect(self._show_notification)
             self._apply_status(self.level, self.charging, self.status_text)
 
         def _apply_status(self, level: int, charging: bool, status_text: str):
@@ -105,17 +105,8 @@ if not IS_WINDOWS and QObject is not None:
         def _update_ui_status(self):
             self.status_changed.emit(self.level, self.charging, self.status_text)
 
-        def _show_notification(self, title: str, message: str):
-            def _send():
-                try:
-                    subprocess.run(["notify-send", title, message], check=False)
-                except FileNotFoundError:
-                    pass
-
-            threading.Thread(target=_send, daemon=True).start()
-
         def _notify(self, title: str, message: str):
-            self.notification_requested.emit(title, message)
+            safe_notify(title, message, sound=self.notification_sound)
 
         def _on_activated(self, reason):
             if reason == QSystemTrayIcon.ActivationReason.Trigger:
