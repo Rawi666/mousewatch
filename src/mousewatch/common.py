@@ -1,6 +1,7 @@
 import subprocess
 import threading
 import time
+import traceback
 from contextlib import nullcontext
 from typing import Any
 
@@ -40,8 +41,11 @@ def notify_windows(title: str, message: str, sound: bool = True):
 def safe_notify(title: str, message: str, sound: bool = True):
     try:
         notify_windows(title, message, sound=sound)
-    except (OSError, RuntimeError, ValueError) as exc:
+        return True
+    except Exception as exc:
         print(f"Notification error: {exc}")
+        traceback.print_exc()
+        return False
 
 
 class Common:
@@ -281,7 +285,7 @@ class Common:
 
     def _refresh_status(self) -> str:
         # Manual refresh should feel responsive; polling still uses longer retries.
-        resp = self._recover_path_and_query(retries=1, delay=0.2)
+        resp = self._recover_path_and_query(retries=2, delay=0.2)
         if resp is None:
             self._set_disconnected_state()
             return "No mouse detected. Waiting for device..."
