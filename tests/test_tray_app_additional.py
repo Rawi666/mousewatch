@@ -1,3 +1,4 @@
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -63,9 +64,10 @@ def _build_app():
     return TrayApp(DummyProtocol(), "A9 Plus", b"path", {"battery_level": 50, "charge_status": 0}, _settings())
 
 
-def test_create_menu_returns_none_when_menu_disabled():
+def test_create_menu_returns_none_when_menu_disabled(monkeypatch):
     app = _build_app()
     app._menu_supported = False
+    monkeypatch.setitem(sys.modules, "pystray", None)
 
     assert app._create_menu() is None
 

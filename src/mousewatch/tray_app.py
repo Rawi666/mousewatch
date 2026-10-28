@@ -56,10 +56,11 @@ class TrayApp(Common):
             self._ui_dispatcher.start()
 
     def _create_menu(self):
-        import pystray
-
         if not self._menu_supported:
             return None
+
+        import pystray
+
         return pystray.Menu(
             pystray.MenuItem("Status", self._on_status, default=True),
             pystray.MenuItem("Settings", self._on_settings),
